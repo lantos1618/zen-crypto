@@ -1,0 +1,16 @@
+// Experimental byte-comparison foundation, not a constant-time guarantee.
+// Both pointers must cover count readable bytes, with live storage throughout
+// this synchronous call. Inputs may alias. Null is allowed only at count zero.
+// The caller provides the common length: differing lengths are not hidden.
+// No allocation, copying, retained pointer, or early mismatch return.
+equal_bytes_candidate* = (left: Ptr<u8>, right: Ptr<u8>, count: usize) bool {
+    // Sum is bounded by count; even usize.MAX readable bytes cannot overflow.
+    different: usize ::= 0;
+    Range(0, count).loop((i) {
+        mismatch: usize = (left.read(i) == right.read(i)).match({true => 0, false => 1});
+        // Wrapping spelling avoids an unnecessary checked-overflow branch.
+        // The bound above means wrapping cannot occur for valid inputs.
+        different = different +% mismatch;
+    });
+    different == 0
+}

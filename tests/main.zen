@@ -1,0 +1,39 @@
+equal_bytes_candidate = crypto
+main = (env: Env) Res<i32, AllocError> {
+    a     = env.mem.alloc();
+    left  = a.realloc<u8>(null_ptr<u8>(), 1024).try();
+    right = a.realloc<u8>(null_ptr<u8>(), 1024).try();
+    good ::= equal_bytes_candidate(null_ptr<u8>(), null_ptr<u8>(), 0);
+    Range(0, 1024).loop((i) {left.write(i, 42); right.write(i, 42);});
+    good = good && equal_bytes_candidate(left, right, 1024);
+    good = good && equal_bytes_candidate(left, left, 1024);
+    // Every mismatch position, not only the first and last.
+    Range(0, 1024).loop((i) {
+        right.write(i, 43);
+        good = good && !equal_bytes_candidate(left, right, 1024);
+        right.write(i, 42);
+    });
+    // Equal/different tests around common vector-tail boundaries.
+    Range(0, 66).loop((length) {
+        good = good && equal_bytes_candidate(left, right, length);
+        (length > 0).then(() {
+            right.write(length - 1, 0);
+            good = good && !equal_bytes_candidate(left, right, length);
+            right.write(length - 1, 42);
+        });
+    });
+    // Exercise every byte value; no text/UTF-8 assumptions.
+    Range(0, 256).loop((n) {
+        byte = n.to_u8().match({Ok(v) => v, None => 0});
+        left.write(n, byte);
+        right.write(n, byte);
+    });
+    good = good && equal_bytes_candidate(left, right, 256);
+    right.write(255, 0);
+    good = good && !equal_bytes_candidate(left, right, 256);
+    println(
+        "Byte equality: zero, alias, 1024 mismatch positions, 0..65 tails, all byte values: {}",
+        good
+    );
+    Ok(good.match({true => 0, false => 1}))
+}

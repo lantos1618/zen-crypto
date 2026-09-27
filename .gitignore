@@ -1,0 +1,8 @@
+/build/
+**/build/
+**/xcuserdata/
+**/com.apple.DeveloperTools/
+*.mobileprovision
+*.p12
+*.p8
+*.xcarchive/

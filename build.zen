@@ -1,0 +1,12 @@
+Builder, BuildError = std.build
+build = (b :: Builder) Res<(), BuildError> {
+    crypto = b.lib(
+        "crypto",
+        {src: Path("src/crypto.zen"), libs: [], paths: []}
+    ).try();
+    b.exe(
+        "test",
+        {src: Path("tests/main.zen"), deps: [crypto], out: Ok(Path("build/test"))}
+    ).try();
+    Ok(())
+}

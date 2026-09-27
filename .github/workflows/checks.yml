@@ -1,0 +1,36 @@
+name: Portable checks
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  portable:
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: zen-crypto
+      - uses: actions/checkout@v6
+        with:
+          repository: lantos1618/zen
+          ref: ac21f5b69bbf642c75c0d9f66703991077a435b3
+          path: zen
+      - name: Bootstrap pinned compiler
+        run: make -C zen build/bootstrap/zen-seed CACHE=
+      - name: Build and run portable tests
+        working-directory: zen-crypto
+        env:
+          ZEN_STD: ${{ github.workspace }}/zen/src
+        run: |
+          set -euo pipefail
+          ../zen/build/bootstrap/zen-seed build test
+          ./build/test
+      - name: Scope of verification
+        if: always()
+        run: echo 'These checks cover portable tests only. Native UI, iOS signing, media devices and candidate actor-runtime checks require the integration lane.' >> "$GITHUB_STEP_SUMMARY"
