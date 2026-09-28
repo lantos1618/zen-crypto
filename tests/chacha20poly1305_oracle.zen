@@ -1,0 +1,99 @@
+// Test-only external oracle; this binding is never imported from src.
+chacha20poly1305_seal, chacha20poly1305_open = chacha20poly1305
+Oracle = c.bind("sodium.h", {
+    sodium_init = () i32
+    crypto_aead_chacha20poly1305_ietf_encrypt = (out: Ptr<u8>, count: Ptr<u64>, message: Ptr<u8>, message_count: u64, aad: Ptr<u8>, aad_count: u64, secret: Ptr<u8>, nonce: Ptr<u8>, key: Ptr<u8>) i32
+})
+same = (a: Ptr<u8>, b: Ptr<u8>, count: usize) bool {
+    good ::= true; Range(0, count).loop((i) { good = (a.read(i) == b.read(i)) && good; }); good
+}
+small = (n: usize) u8 { (n % 256).to_u8().match({Ok(b) => b,None => 0}) }
+main = (env: Env) Res<i32, AllocError> {
+    a       = env.mem.alloc();
+    memory  = a.realloc<u8>(null_ptr<u8>(), 70000).try();
+    message =memory; output=memory.offset(17000); expected=memory.offset(34000); plain=memory.offset(51000);
+    key =memory.offset(68000); nonce=memory.offset(68032); aad=memory.offset(68048);
+    length = a.create<u64>().try(); scratch = a.realloc<u64>(
+        null_ptr<u64>(),
+        42
+    ).try();
+    failures: usize ::= 0; cases: usize ::= 0;
+    (Oracle.sodium_init() < 0).then(() { failures = failures + 1; });
+    Range(0, 8).loop((seed) {
+        Range(0, 16385).loop((i) { message.write(i, small(seed*47+i*13+i/7)); });
+        Range(0, 32).loop((i) { key.write(i, small(seed*61+i*19)); });
+        Range(0, 12).loop((i) { nonce.write(i, small(seed*31+i*7)); });
+        Range(0, 65).loop((i) { aad.write(i, small(seed*37+i*23)); });
+        Range(0, 15).loop((size) {
+            count: usize = size.match({0=>0,1=>1,2=>15,3=>16,4=>17,5=>31,6=>32,7=>63,8=>64,9=>65,10=>127,11=>128,12=>129,13=>16384,_=>16385});
+            Range(0, 9).loop((adsize) {
+                adcount: usize = adsize.match({0=>0,1=>1,2=>15,3=>16,4=>17,5=>31,6=>32,7=>63,_=>65});
+                memory.write(16999, 165); output.write(count+16, 165);
+                memory.write(50999, 165); plain.write(count, 165);
+                scratch.write(40, 123456); scratch.write(41, 654321);
+                good ::= Oracle.crypto_aead_chacha20poly1305_ietf_encrypt(
+                    expected,
+                    length,
+                    message,
+                    count.to_u64(),
+                    aad,
+                    adcount.to_u64(),
+                    null_ptr<u8>(),
+                    nonce,
+                    key
+                )==0;
+                good = length.read(0)==(count+16).to_u64() && good;
+                good = chacha20poly1305_seal(
+                    output,
+                    count+16,
+                    message,
+                    count,
+                    aad,
+                    adcount,
+                    key,
+                    nonce,
+                    scratch,
+                    40
+                ) && good;
+                good = same(output, expected, count+16) && good;
+                good = chacha20poly1305_open(plain, count, expected, count+16, aad, adcount, key, nonce, scratch, 40) && same(plain, message, count) && good;
+                Range(0, count).loop((i) { plain.write(i, 165); });
+                changed =count+seed%16; old=output.read(changed); output.write(changed, old+%1);
+                good = !chacha20poly1305_open(
+                    plain,
+                    count,
+                    output,
+                    count+16,
+                    aad,
+                    adcount,
+                    key,
+                    nonce,
+                    scratch,
+                    40
+                ) && good;
+                Range(0, count).loop((i) { good = (plain.read(i)==165) && good; });
+                output.write(changed, old);
+                good = memory.read(16999)==165 && output.read(count+16)==165 && memory.read(50999)==165 && plain.read(count)==165 && scratch.read(40)==123456 && scratch.read(41)==654321 && good;
+                // Exact in-place path must equal the independent oracle too.
+                output.copy_from(message, count);
+                good = chacha20poly1305_seal(output, count+16, output, count, aad, adcount, key, nonce, scratch, 40) && same(output, expected, count+16) && good;
+                good = chacha20poly1305_open(output, count, output, count+16, aad, adcount, key, nonce, scratch, 40) && same(output, message, count) && good;
+                (!good).then(
+                    () { failures=failures+1; println(
+                        "ChaCha case failed seed={} message={} aad={}",
+                        seed,
+                        count,
+                        adcount
+                    ); }
+                );
+                cases =cases+1;
+            });
+        });
+    });
+    println(
+        "ChaCha20-Poly1305 libsodium differential: {} cases, {} failures",
+        cases,
+        failures
+    );
+    Ok((failures==0).match({true=>0,false=>1}))
+}

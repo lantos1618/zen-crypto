@@ -1,0 +1,375 @@
+// Experimental TLS 1.3 SHA-256 key schedule and ChaCha20-Poly1305 records.
+// RFC 8446 sections 4.4.4, 5.2, 5.3, 7.1 and 7.3. Not a complete TLS endpoint.
+// Scratch is >=4096 aligned u64 words, disjoint from every other span. Inputs
+// must be live at declared lengths. Secret/key/hash fixed spans are 32 bytes,
+// IV is 12. Output must not overlap key/IV/secret/context spans.
+// Internal helpers reserve disjoint portions of the shared workspace.
+// Scratch retains secrets; no secure erasure or timing audit claimed.
+Ptr, null_ptr = std.mem
+bit_xor = std.core.num
+sha256_candidate = sha256
+hmac_sha256_candidate = hmac_sha256
+hkdf_extract_candidate, hkdf_expand_candidate = hkdf
+chacha20poly1305_seal, chacha20poly1305_open = chacha20poly1305
+Tls13Error* = Invalid | Authentication | Exhausted
+Tls13Plain* = { count*: usize, kind*: u8 }
+workspace = (
+    scratch : Ptr<u64>,
+    words   : usize
+) bool { !scratch.is_null() && words >= 4096 }
+b8 = (n: usize) u8 { (n % 256).to_u8().match({Ok(v) => v, None => 0}) }
+
+// Output must not overlap secret/context. Labels exclude the "tls13 " prefix.
+tls13_expand_label* = (
+    out           : Ptr<u8>,
+    capacity      : usize,
+    count         : usize,
+    secret        : Ptr<u8>,
+    label         : str,
+    context       : Ptr<u8>,
+    context_count : usize,
+    scratch       : Ptr<u64>,
+    words         : usize
+) bool {
+    valid = workspace(
+        scratch,
+        words
+    ) && !out.is_null() && !secret.is_null() && capacity >= count && count <= 8160 && label.len > 0 && label.len <= 249 && context_count <= 255 && (context_count == 0 || !context.is_null());
+    valid.match({false => false, true => {
+        p = scratch.to<u8>(); info = p.offset(1024);
+        info.write(0, b8(count / 256)); info.write(1, b8(count)); info.write(2, b8(label.len + 6));
+        prefix: str = "tls13 "; info.offset(3).copy_from(prefix.ptr(), 6);
+        info.offset(9).copy_from(label.ptr(), label.len);
+        info.write(9 + label.len, b8(context_count));
+        (context_count > 0).then(
+            () { info.offset(10 + label.len).copy_from(context, context_count); }
+        );
+        hkdf_expand_candidate(
+            out,
+            capacity,
+            count,
+            secret,
+            32,
+            info,
+            10 + label.len + context_count,
+            p.offset(1600),
+            256,
+            p.offset(1856).to<u32>(),
+            72
+        )
+    }})
+}
+tls13_derive_secret* = (
+    out             : Ptr<u8>,
+    capacity        : usize,
+    secret          : Ptr<u8>,
+    label           : str,
+    transcript_hash : Ptr<u8>,
+    scratch         : Ptr<u64>,
+    words           : usize
+) bool {
+    tls13_expand_label(
+        out,
+        capacity,
+        32,
+        secret,
+        label,
+        transcript_hash,
+        32,
+        scratch,
+        words
+    )
+}
+extract = (
+    out     : Ptr<u8>,
+    salt    : Ptr<u8>,
+    ikm     : Ptr<u8>,
+    count   : usize,
+    scratch : Ptr<u64>
+) bool {
+    p = scratch.to<u8>();
+    hkdf_extract_candidate(
+        out,
+        32,
+        salt,
+        32,
+        ikm,
+        count,
+        p.offset(1600),
+        256,
+        p.offset(1856).to<u32>(),
+        72
+    )
+}
+empty_hash = (scratch: Ptr<u64>) bool {
+    p = scratch.to<u8>();
+    sha256_candidate(
+        p.offset(544),
+        32,
+        null_ptr<u8>(),
+        0,
+        p.offset(1600),
+        256,
+        p.offset(1856).to<u32>(),
+        72
+    )
+}
+tls13_finished* = (
+    out             : Ptr<u8>,
+    capacity        : usize,
+    traffic_secret  : Ptr<u8>,
+    transcript_hash : Ptr<u8>,
+    scratch         : Ptr<u64>,
+    words           : usize
+) bool {
+    valid = workspace(
+        scratch,
+        words
+    ) && !out.is_null() && capacity >= 32 && !traffic_secret.is_null() && !transcript_hash.is_null();
+    valid.match({false => false, true => {
+        p = scratch.to<u8>();
+        tls13_expand_label(
+            p.offset(512),
+            32,
+            32,
+            traffic_secret,
+            "finished",
+            null_ptr<u8>(),
+            0,
+            scratch,
+            words
+        ) &&
+        hmac_sha256_candidate(
+            out,
+            capacity,
+            p.offset(512),
+            32,
+            transcript_hash,
+            32,
+            p.offset(1600),
+            256,
+            p.offset(1856).to<u32>(),
+            72
+        )
+    }})
+}
+// External PSK binder, not a resumption binder.
+tls13_binder* = (
+    out             : Ptr<u8>,
+    capacity        : usize,
+    psk             : Ptr<u8>,
+    psk_count       : usize,
+    transcript_hash : Ptr<u8>,
+    scratch         : Ptr<u64>,
+    words           : usize
+) bool {
+    valid = workspace(
+        scratch,
+        words
+    ) && !out.is_null() && capacity >= 32 && !psk.is_null() && psk_count > 0 && !transcript_hash.is_null();
+    valid.match({false => false, true => {
+        p = scratch.to<u8>(); Range(0, 32).loop((i) { p.write(256 + i, 0); });
+        extract(p, p.offset(256), psk, psk_count, scratch) && empty_hash(scratch) &&
+        tls13_derive_secret(
+            p.offset(32),
+            32,
+            p,
+            "ext binder",
+            p.offset(544),
+            scratch,
+            words
+        ) &&
+        tls13_finished(
+            out,
+            capacity,
+            p.offset(32),
+            transcript_hash,
+            scratch,
+            words
+        )
+    }})
+}
+// psk_ke: no (EC)DHE. Output: early, handshake, client/server handshake secrets.
+tls13_handshake_secrets* = (
+    out             : Ptr<u8>,
+    capacity        : usize,
+    psk             : Ptr<u8>,
+    psk_count       : usize,
+    transcript_hash : Ptr<u8>,
+    scratch         : Ptr<u64>,
+    words           : usize
+) bool {
+    valid = workspace(
+        scratch,
+        words
+    ) && !out.is_null() && capacity >= 128 && !psk.is_null() && psk_count > 0 && !transcript_hash.is_null();
+    valid.match({false => false, true => {
+        p = scratch.to<u8>(); Range(0, 32).loop((i) { p.write(256 + i, 0); });
+        good = extract(p, p.offset(256), psk, psk_count, scratch) && empty_hash(scratch) &&
+            tls13_derive_secret(
+                p.offset(160),
+                32,
+                p,
+                "derived",
+                p.offset(544),
+                scratch,
+                words
+            ) &&
+            extract(p.offset(32), p.offset(160), p.offset(256), 32, scratch) &&
+            tls13_derive_secret(
+                p.offset(64),
+                32,
+                p.offset(32),
+                "c hs traffic",
+                transcript_hash,
+                scratch,
+                words
+            ) &&
+            tls13_derive_secret(
+                p.offset(96),
+                32,
+                p.offset(32),
+                "s hs traffic",
+                transcript_hash,
+                scratch,
+                words
+            );
+        good.then(() { out.copy_from(p, 128); }); good
+    }})
+}
+// Output: master, client/server application traffic secrets at server Finished.
+tls13_application_secrets* = (
+    out              : Ptr<u8>,
+    capacity         : usize,
+    handshake_secret : Ptr<u8>,
+    transcript_hash  : Ptr<u8>,
+    scratch          : Ptr<u64>,
+    words            : usize
+) bool {
+    valid = workspace(
+        scratch,
+        words
+    ) && !out.is_null() && capacity >= 96 && !handshake_secret.is_null() && !transcript_hash.is_null();
+    valid.match({false => false, true => {
+        p = scratch.to<u8>(); Range(0, 32).loop((i) { p.write(256 + i, 0); });
+        good = empty_hash(scratch) && tls13_derive_secret(p.offset(160), 32, handshake_secret, "derived", p.offset(544), scratch, words) &&
+            extract(p, p.offset(160), p.offset(256), 32, scratch) &&
+            tls13_derive_secret(
+                p.offset(32),
+                32,
+                p,
+                "c ap traffic",
+                transcript_hash,
+                scratch,
+                words
+            ) &&
+            tls13_derive_secret(
+                p.offset(64),
+                32,
+                p,
+                "s ap traffic",
+                transcript_hash,
+                scratch,
+                words
+            );
+        good.then(() { out.copy_from(p, 96); }); good
+    }})
+}
+// Output: 32-byte ChaCha20 key followed by 12-byte IV.
+tls13_traffic_keys* = (
+    out            : Ptr<u8>,
+    capacity       : usize,
+    traffic_secret : Ptr<u8>,
+    scratch        : Ptr<u64>,
+    words          : usize
+) bool {
+    valid = workspace(
+        scratch,
+        words
+    ) && !out.is_null() && capacity >= 44 && !traffic_secret.is_null();
+    valid.match({false => false, true => {
+        p    = scratch.to<u8>();
+        good = tls13_expand_label(
+            p,
+            32,
+            32,
+            traffic_secret,
+            "key",
+            null_ptr<u8>(),
+            0,
+            scratch,
+            words
+        ) &&
+            tls13_expand_label(
+                p.offset(32),
+                12,
+                12,
+                traffic_secret,
+                "iv",
+                null_ptr<u8>(),
+                0,
+                scratch,
+                words
+            );
+        good.then(() { out.copy_from(p, 44); }); good
+    }})
+}
+nonce = (out: Ptr<u8>, iv: Ptr<u8>, sequence: u64) () {
+    out.copy_from(iv, 12); number ::= sequence;
+    Range(0, 8).loop((i) {
+        byte  = number % 256;
+        value = out.read(11 - i).to_u64().bit_xor(byte);
+        out.write(11 - i, value.to_usize().match({Ok(v) => b8(v), None => 0}));
+        number = number / 256;
+    });
+}
+// No padding emitted. Caller tracks separate sequence numbers per key/direction;
+// advance after success and never reuse. MAX rejected before wrap is possible.
+tls13_seal* = (
+    out      : Ptr<u8>,
+    capacity : usize,
+    message  : Ptr<u8>,
+    count    : usize,
+    kind     : u8,
+    key      : Ptr<u8>,
+    iv       : Ptr<u8>,
+    sequence : u64,
+    scratch  : Ptr<u64>,
+    words    : usize
+) Res<usize, Tls13Error> {
+    (workspace(scratch, words) && !out.is_null() && !key.is_null() && !iv.is_null() && count <= 16384 && capacity >= count + 22 && (count == 0 || !message.is_null()) && (kind == 21 || kind == 22 || kind == 23) && (count > 0 || kind == 23)).ensure(Tls13Error.Invalid).try();
+    (sequence != 18446744073709551615).ensure(Tls13Error.Exhausted).try();
+    p = scratch.to<u8>();
+    (count > 0).then(() { p.copy_from(message, count); }); p.write(count, kind);
+    header = p.offset(16640); iv_nonce = p.offset(16648);
+    header.write(0, 23); header.write(1, 3); header.write(2, 3); header.write(3, b8((count + 17) / 256)); header.write(4, b8(count + 17));
+    nonce(iv_nonce, iv, sequence);
+    chacha20poly1305_seal(out.offset(5), capacity - 5, p, count + 1, header, 5, key, iv_nonce, scratch.offset(2083), 40).ensure(Tls13Error.Invalid).try();
+    out.copy_from(header, 5); Ok(count + 22)
+}
+// Authenticated plaintext is staged in scratch. Output stays unchanged on any
+// error, including invalid inner type/padding. Accepts RFC record padding.
+tls13_open* = (
+    out      : Ptr<u8>,
+    capacity : usize,
+    record   : Ptr<u8>,
+    count    : usize,
+    key      : Ptr<u8>,
+    iv       : Ptr<u8>,
+    sequence : u64,
+    scratch  : Ptr<u64>,
+    words    : usize
+) Res<Tls13Plain, Tls13Error> {
+    (workspace(scratch, words) && !out.is_null() && !record.is_null() && !key.is_null() && !iv.is_null() && count >= 22 && count <= 16645).ensure(Tls13Error.Invalid).try();
+    (sequence != 18446744073709551615).ensure(Tls13Error.Exhausted).try();
+    (record.read(0) == 23 && record.read(1) == 3 && record.read(2) == 3 && record.read(3).to_usize() * 256 + record.read(4).to_usize() == count - 5).ensure(Tls13Error.Invalid).try();
+    p = scratch.to<u8>(); iv_nonce = p.offset(16648); nonce(iv_nonce, iv, sequence);
+    chacha20poly1305_open(p, 16640, record.offset(5), count - 5, record, 5, key, iv_nonce, scratch.offset(2083), 40).ensure(Tls13Error.Authentication).try();
+    end ::= count - 21;
+    loop(() { end > 0 && p.read(end - 1) == 0 }, (h) { end = end - 1; });
+    (end > 0).ensure(Tls13Error.Invalid).try(); kind = p.read(end - 1); content = end - 1;
+    ((kind == 21 || kind == 22 || kind == 23) && content <= 16384 && content <= capacity && (content > 0 || kind == 23)).ensure(
+        Tls13Error.Invalid
+    ).try();
+    (content > 0).then(() { out.copy_from(p, content); }); Ok(Tls13Plain(count: content, kind: kind))
+}

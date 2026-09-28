@@ -1,0 +1,279 @@
+sha256_candidate, sha256_init = sha256
+hmac_sha256_candidate, hmac_sha256_parts_candidate = hmac_sha256
+hkdf_extract_candidate, hkdf_expand_candidate = hkdf
+
+nibble = (
+    byte : u8
+) u8 { (byte <= 57).match({true => byte - 48, false => byte - 87}) }
+decode = (out: Ptr<u8>, hex: str) () {
+    Range(0, hex.len / 2).loop((i) { out.write(i, nibble(hex.ptr().read(i * 2)) * 16 + nibble(hex.ptr().read(i * 2 + 1))); });
+}
+matches = (out: Ptr<u8>, hex: str) bool {
+    good ::= true;
+    Range(0, hex.len / 2).loop((i) { good = (out.read(i) == nibble(hex.ptr().read(i * 2)) * 16 + nibble(hex.ptr().read(i * 2 + 1))) && good; });
+    good
+}
+
+Harness* = {
+    input: Ptr<u8>, key: Ptr<u8>, info: Ptr<u8>, output: Ptr<u8>, prk: Ptr<u8>,
+    bytes: Ptr<u8>, words: Ptr<u32>,
+
+    sha* = (self: @Self, input_hex: str, expected: str) bool {
+        decode(self.input, input_hex);
+        self.sha_ready(input_hex.len / 2, expected)
+    }
+
+    million* = (self: @Self) bool {
+        Range(0, 1000000).loop((i) { self.input.write(i, 97); });
+        self.sha_ready(
+            1000000,
+            "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
+        )
+    }
+
+    sha_ready = (self: @Self, count: usize, expected: str) bool {
+        good ::= sha256_candidate(
+            self.output,
+            8160,
+            self.input,
+            count,
+            self.bytes,
+            256,
+            self.words,
+            72
+        )
+            && matches(self.output, expected);
+        good = sha256_init(self.words, 72, self.bytes, 256).match({
+            None        => false,
+            Ok(initial) => {
+                state       ::= initial;
+                valid       ::= state.update(null_ptr<u8>(), 0);
+                done: usize ::= 0;
+                (done < count).loop((loop) {
+                    wanted = 1 + done % 67;
+                    take   = (count - done < wanted).match({true => count - done, false => wanted});
+                    valid  = state.update(
+                        self.input.offset(done),
+                        take
+                    ) && valid;
+                    done   = done + take;
+                });
+                valid = !state.finish(self.output, 31) && valid;
+                valid = state.finish(self.output, 8160) && matches(self.output, expected) && valid;
+                valid = !state.update(self.input, 1) && !state.finish(self.output, 8160) && valid;
+                valid
+            },
+        }) && good;
+        good = sha256_candidate(
+            self.input,
+            1000000,
+            self.input,
+            count,
+            self.bytes,
+            256,
+            self.words,
+            72
+        )
+            && matches(self.input, expected) && good;
+        good
+    }
+
+    hmac* = (self: @Self, key_hex: str, input_hex: str, expected: str) bool {
+        decode(self.input, input_hex); decode(self.key, key_hex);
+        count = input_hex.len / 2; key_count = key_hex.len / 2;
+        good ::= hmac_sha256_candidate(self.output, 8160, self.key, key_count, self.input, count, self.bytes, 256, self.words, 72) && matches(self.output, expected);
+        split = count / 3;
+        good  = hmac_sha256_parts_candidate(self.output, 8160, self.key, key_count, self.input, split, self.input.offset(split), split, self.input.offset(split * 2), count - split * 2, self.bytes, 256, self.words, 72) && matches(self.output, expected) && good;
+        good  = hmac_sha256_candidate(self.key, 512, self.key, key_count, self.input, count, self.bytes, 256, self.words, 72) && matches(self.key, expected) && good;
+        good
+    }
+
+    hkdf* = (self: @Self, salt_hex: str, ikm_hex: str, info_hex: str, prk_hex: str, expected: str) bool {
+        decode(self.key, salt_hex); decode(self.input, ikm_hex); decode(self.info, info_hex);
+        good ::= hkdf_extract_candidate(self.prk, 32, self.key, salt_hex.len / 2, self.input, ikm_hex.len / 2, self.bytes, 256, self.words, 72) && matches(self.prk, prk_hex);
+        good = hkdf_expand_candidate(self.output, 8160, expected.len / 2, self.prk, 32, self.info, info_hex.len / 2, self.bytes, 256, self.words, 72) && matches(self.output, expected) && good;
+        good
+    }
+
+    invalid* = (self: @Self) bool {
+        self.output.write(0, 173);
+        good ::= !sha256_candidate(
+            self.output,
+            31,
+            self.input,
+            0,
+            self.bytes,
+            256,
+            self.words,
+            72
+        );
+        good = !sha256_candidate(
+            self.output,
+            32,
+            null_ptr<u8>(),
+            1,
+            self.bytes,
+            256,
+            self.words,
+            72
+        ) && good;
+        good = !sha256_candidate(
+            self.output,
+            32,
+            self.input,
+            0,
+            self.bytes,
+            63,
+            self.words,
+            72
+        ) && good;
+        good = !sha256_candidate(
+            self.output,
+            32,
+            self.input,
+            0,
+            self.bytes,
+            256,
+            self.words,
+            71
+        ) && good;
+        good = !sha256_candidate(
+            self.output,
+            32,
+            self.input,
+            usize.MAX,
+            self.bytes,
+            256,
+            self.words,
+            72
+        ) && good;
+        good = !hmac_sha256_candidate(
+            self.output,
+            32,
+            null_ptr<u8>(),
+            1,
+            self.input,
+            0,
+            self.bytes,
+            256,
+            self.words,
+            72
+        ) && good;
+        good = !hmac_sha256_candidate(
+            self.output,
+            32,
+            self.key,
+            1,
+            null_ptr<u8>(),
+            1,
+            self.bytes,
+            256,
+            self.words,
+            72
+        ) && good;
+        good = !hmac_sha256_candidate(
+            self.output,
+            32,
+            self.key,
+            1,
+            self.input,
+            0,
+            self.bytes,
+            191,
+            self.words,
+            72
+        ) && good;
+        good = !hmac_sha256_candidate(
+            self.output,
+            32,
+            self.key,
+            usize.MAX,
+            self.input,
+            0,
+            self.bytes,
+            256,
+            self.words,
+            72
+        ) && good;
+        good = !hkdf_expand_candidate(
+            self.output,
+            8160,
+            8161,
+            self.prk,
+            32,
+            self.info,
+            0,
+            self.bytes,
+            256,
+            self.words,
+            72
+        ) && good;
+        good = !hkdf_expand_candidate(
+            self.output,
+            8160,
+            32,
+            self.prk,
+            31,
+            self.info,
+            0,
+            self.bytes,
+            256,
+            self.words,
+            72
+        ) && good;
+        good = !hkdf_expand_candidate(
+            self.output,
+            8160,
+            32,
+            self.prk,
+            32,
+            null_ptr<u8>(),
+            1,
+            self.bytes,
+            256,
+            self.words,
+            72
+        ) && good;
+        good = !hkdf_expand_candidate(
+            self.output,
+            8160,
+            32,
+            self.prk,
+            32,
+            self.info,
+            0,
+            self.bytes,
+            255,
+            self.words,
+            72
+        ) && good;
+        good = !hkdf_expand_candidate(
+            self.output,
+            8160,
+            32,
+            self.prk,
+            32,
+            self.info,
+            usize.MAX,
+            self.bytes,
+            256,
+            self.words,
+            72
+        ) && good;
+        good = self.output.read(0) == 173 && good;
+        good = hkdf_expand_candidate(
+            null_ptr<u8>(),
+            0,
+            0,
+            self.prk,
+            32,
+            null_ptr<u8>(),
+            0,
+            self.bytes,
+            256,
+            self.words,
+            72
+        ) && good;
+        good
+    }
+}

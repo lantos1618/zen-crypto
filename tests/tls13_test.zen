@@ -1,0 +1,29 @@
+tls13_expand_label, tls13_derive_secret, tls13_finished, tls13_binder, tls13_handshake_secrets, tls13_application_secrets, tls13_traffic_keys, tls13_seal, tls13_open, Tls13Error = tls13
+sha256_candidate = sha256
+nibble = (
+    byte : u8
+) u8 { (byte <= 57).match({true => byte - 48, false => byte - 87}) }
+unhex = (out: Ptr<u8>, text: str) () { Range(0, text.len / 2).loop((i) { out.write(i, nibble(text.ptr().read(i * 2)) * 16 + nibble(text.ptr().read(i * 2 + 1))); }); }
+same = (actual: Ptr<u8>, text: str) bool {
+    good ::= true;
+    Range(0, text.len / 2).loop((i) { good = good && actual.read(i) == nibble(text.ptr().read(i * 2)) * 16 + nibble(text.ptr().read(i * 2 + 1)); }); good
+}
+main = (env: Env) Res<i32, AllocError | Tls13Error> {
+    a       = env.mem.alloc();
+    storage = a.realloc<u8>(null_ptr<u8>(), 100000).try();
+    scratch = a.realloc<u64>(null_ptr<u64>(), 4097).try();
+    message = storage; output = storage.offset(17000); expected = storage.offset(34000);
+    key = storage.offset(51000); iv = storage.offset(51100); psk = storage.offset(51200); hash = storage.offset(51300); secret = storage.offset(51400); schedule = storage.offset(52000); digest = storage.offset(53000);
+    hash_bytes     = storage.offset(54000);
+    separate_words = a.realloc<u32>(null_ptr<u32>(), 72).try();
+    good ::= true;
+    Range(0, 16384).loop((i) { message.write(i, (i % 256).to_u8().match({Ok(v) => v, None => 0})); });
+    scratch.write(4096, 123456789);
+    // VECTORS
+    good = scratch.read(4096) == 123456789 && good;
+    println(
+        "TLS13 native SHA256 schedule, RFC8448 derive, Python record vectors, padding and tamper checks: {}",
+        good
+    );
+    Ok(good.match({true => 0, false => 1}))
+}

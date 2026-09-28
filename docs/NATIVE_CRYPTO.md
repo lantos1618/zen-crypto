@@ -10,12 +10,23 @@ in the compiler and standard numeric module, with defined word-width behavior,
 not in an algorithm-specific C shim. Generated C is the existing Zen backend;
 that does not make a source-level Zen algorithm a handwritten C implementation.
 
-## Order of work
+## TLS prerequisite milestone
 
-1. BLAKE2b one-shot unkeyed/keyed hashing, independent vectors and differential
-   tests, followed by a streaming API and performance measurements.
-2. ChaCha20/HChaCha20, then Poly1305, then XChaCha20-Poly1305. Validate each
-   component before composing AEAD. Authentication failure must not expose
+Native SHA-256 (including incremental updates), HMAC-SHA256, HKDF-SHA256 and
+IETF ChaCha20-Poly1305 now support the TLS 1.3 key schedule and record layer.
+They are source-level Zen algorithms; only test programs use independent
+hashlib/HMAC, Python cryptography or libsodium references. Known vectors include
+RFC 4231, RFC 5869, RFC 8439 and RFC 8448. Optimized and UBSan tests cover block
+boundaries, maximum HKDF output, altered tags and failure-before-output behavior.
+These results do not establish portable constant-time behavior or production
+security. [TLS scope and commands](TLS13.md).
+
+## Remaining order of work
+
+1. BLAKE2b streaming API and performance measurements; one-shot keyed/unkeyed
+   hashing and its vector/differential suites are already implemented.
+2. HChaCha20 and XChaCha20-Poly1305, extending the tested IETF ChaCha20/Poly1305
+   implementation. Validate each component before composing AEAD. Authentication failure must not expose
    unauthenticated plaintext. Check counter exhaustion and overlap contracts.
 3. SHA-512 and HMAC-SHA512/256 for the `crypto_auth` surface.
 4. X25519 and the exact libsodium directional key-exchange construction.

@@ -17,3 +17,6 @@ clang -O2 build/test.c -o build/emitted-test 2> build/emitted-compile.log
 ./build/emitted-test
 
 sh scripts/check-blake2b-native.sh
+
+"${PYTHON:-python3}" scripts/check-sha256.py
+sh scripts/check-chacha20poly1305-native.sh

@@ -1,0 +1,299 @@
+// RFC8439 section2.8.2, standalone: no external crypto library is linked.
+chacha20poly1305_seal, chacha20poly1305_open = chacha20poly1305
+hex_value = (b: u8) u8 { (b <= 57).match({true => b - 48, false => b - 87}) }
+decode = (out: Ptr<u8>, hex: str) () {
+    Range(0, hex.len / 2).loop((i) { out.write(i, hex_value(hex.ptr().read(2*i))*16 + hex_value(hex.ptr().read(2*i+1))); });
+}
+same = (a: Ptr<u8>, b: Ptr<u8>, count: usize) bool {
+    good ::= true; Range(0, count).loop((i) { good = (a.read(i) == b.read(i)) && good; }); good
+}
+filled = (a: Ptr<u8>, count: usize, value: u8) bool {
+    good ::= true; Range(0, count).loop((i) { good = (a.read(i) == value) && good; }); good
+}
+main = (env: Env) Res<i32, AllocError> {
+    a       = env.mem.alloc();
+    memory  = a.realloc<u8>(null_ptr<u8>(), 1024).try();
+    message = memory; key = memory.offset(128); nonce = memory.offset(160); aad = memory.offset(176);
+    output = memory.offset(208); expected = memory.offset(368); plain = memory.offset(528);
+    scratch = a.realloc<u64>(null_ptr<u64>(), 42).try();
+    decode(
+        message,
+        "4c616469657320616e642047656e746c656d656e206f662074686520636c617373206f66202739393a204966204920636f756c64206f6666657220796f75206f6e6c79206f6e652074697020666f7220746865206675747572652c2073756e73637265656e20776f756c642062652069742e"
+    );
+    decode(
+        key,
+        "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"
+    );
+    decode(nonce, "070000004041424344454647");
+    decode(aad, "50515253c0c1c2c3c4c5c6c7");
+    decode(
+        expected,
+        "d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d63dbea45e8ca9671282fafb69da92728b1a71de0a9e060b2905d6a5b67ecd3b3692ddbd7f2d778b8c9803aee328091b58fab324e4fad675945585808b4831d7bc3ff4def08e4b7a9de576d26586cec64b61161ae10b594f09e26a7e902ecbd0600691"
+    );
+    scratch.write(40, 123456); scratch.write(41, 654321);
+    memory.write(207, 165); output.write(130, 165);
+    good ::= chacha20poly1305_seal(
+        output,
+        130,
+        message,
+        114,
+        aad,
+        12,
+        key,
+        nonce,
+        scratch,
+        40
+    );
+    good = same(output, expected, 130) && good;
+    good = chacha20poly1305_open(
+        plain,
+        114,
+        output,
+        130,
+        aad,
+        12,
+        key,
+        nonce,
+        scratch,
+        40
+    ) && good;
+    good = same(plain, message, 114) && good;
+    // Every ciphertext/tag position must reject before writing plaintext.
+    Range(0, 130).loop((i) {
+        old = output.read(i); output.write(i, old +% 1);
+        Range(0, 114).loop((j) { plain.write(j, 165); });
+        good = !chacha20poly1305_open(plain, 114, output, 130, aad, 12, key, nonce, scratch, 40) && filled(plain, 114, 165) && good;
+        output.write(i, old);
+    });
+    Range(0, 12).loop((i) {
+        old = aad.read(i); aad.write(i, old +% 1);
+        good = !chacha20poly1305_open(plain, 114, output, 130, aad, 12, key, nonce, scratch, 40) && filled(plain, 114, 165) && good;
+        aad.write(i, old);
+        old_nonce = nonce.read(i); nonce.write(i, old_nonce +% 1);
+        good = !chacha20poly1305_open(plain, 114, output, 130, aad, 12, key, nonce, scratch, 40) && filled(plain, 114, 165) && good;
+        nonce.write(i, old_nonce);
+    });
+    Range(0, 32).loop((i) {
+        old = key.read(i); key.write(i, old +% 1);
+        good = !chacha20poly1305_open(plain, 114, output, 130, aad, 12, key, nonce, scratch, 40) && filled(plain, 114, 165) && good;
+        key.write(i, old);
+    });
+    // All invalid argument checks happen before output or scratch writes.
+    Range(0, 40).loop((i) { scratch.write(i, 123456); });
+    good = !chacha20poly1305_seal(
+        plain,
+        113,
+        message,
+        114,
+        aad,
+        12,
+        key,
+        nonce,
+        scratch,
+        40
+    ) && good;
+    good = !chacha20poly1305_seal(
+        plain,
+        18446744073709551615,
+        message,
+        274877906881,
+        aad,
+        12,
+        key,
+        nonce,
+        scratch,
+        40
+    ) && good;
+    good = !chacha20poly1305_open(
+        plain,
+        18446744073709551615,
+        output,
+        274877906897,
+        aad,
+        12,
+        key,
+        nonce,
+        scratch,
+        40
+    ) && good;
+    good = !chacha20poly1305_open(
+        plain,
+        114,
+        output,
+        15,
+        aad,
+        12,
+        key,
+        nonce,
+        scratch,
+        40
+    ) && good;
+    good = !chacha20poly1305_open(
+        plain,
+        113,
+        output,
+        130,
+        aad,
+        12,
+        key,
+        nonce,
+        scratch,
+        40
+    ) && good;
+    good = !chacha20poly1305_seal(
+        plain,
+        130,
+        message,
+        114,
+        aad,
+        12,
+        key,
+        nonce,
+        scratch,
+        39
+    ) && good;
+    good = !chacha20poly1305_seal(
+        plain,
+        130,
+        null_ptr<u8>(),
+        114,
+        aad,
+        12,
+        key,
+        nonce,
+        scratch,
+        40
+    ) && good;
+    good = !chacha20poly1305_seal(
+        plain,
+        130,
+        message,
+        114,
+        null_ptr<u8>(),
+        12,
+        key,
+        nonce,
+        scratch,
+        40
+    ) && good;
+    good = !chacha20poly1305_seal(
+        plain,
+        130,
+        message,
+        114,
+        aad,
+        12,
+        null_ptr<u8>(),
+        nonce,
+        scratch,
+        40
+    ) && good;
+    good = !chacha20poly1305_seal(
+        plain,
+        130,
+        message,
+        114,
+        aad,
+        12,
+        key,
+        null_ptr<u8>(),
+        scratch,
+        40
+    ) && good;
+    good = !chacha20poly1305_seal(
+        plain,
+        130,
+        message,
+        114,
+        aad,
+        12,
+        key,
+        nonce,
+        null_ptr<u64>(),
+        40
+    ) && good;
+    good = !chacha20poly1305_seal(
+        null_ptr<u8>(),
+        130,
+        message,
+        114,
+        aad,
+        12,
+        key,
+        nonce,
+        scratch,
+        40
+    ) && good;
+    Range(0, 40).loop((i) { good = (scratch.read(i) == 123456) && good; });
+    good = filled(plain, 114, 165) && good;
+    // Failed authentication also preserves an exactly in-place ciphertext.
+    original_tag = output.read(129); output.write(129, original_tag +% 1);
+    plain.copy_from(output, 130);
+    good = !chacha20poly1305_open(plain, 114, plain, 130, aad, 12, key, nonce, scratch, 40) && same(plain, output, 130) && good;
+    output.write(129, original_tag);
+    // Exact in-place encryption and authenticated decryption.
+    plain.copy_from(message, 114);
+    good = chacha20poly1305_seal(plain, 130, plain, 114, aad, 12, key, nonce, scratch, 40) && same(plain, expected, 130) && good;
+    good = chacha20poly1305_open(plain, 114, plain, 130, aad, 12, key, nonce, scratch, 40) && same(plain, message, 114) && good;
+    good = chacha20poly1305_seal(
+        plain,
+        16,
+        null_ptr<u8>(),
+        0,
+        null_ptr<u8>(),
+        0,
+        key,
+        nonce,
+        scratch,
+        40
+    ) && good;
+    good = chacha20poly1305_open(
+        plain,
+        0,
+        plain,
+        16,
+        null_ptr<u8>(),
+        0,
+        key,
+        nonce,
+        scratch,
+        40
+    ) && good;
+    good = scratch.read(40) == 123456 && scratch.read(41) == 654321 && memory.read(207) == 165 && output.read(130) == 165 && good;
+    // Independent decryption vector from RFC8439 AppendixA.5.
+    long_cipher   = a.realloc<u8>(null_ptr<u8>(), 281).try();
+    long_plain    = a.realloc<u8>(null_ptr<u8>(), 265).try();
+    long_expected = a.realloc<u8>(null_ptr<u8>(), 265).try();
+    decode(
+        key,
+        "1c9240a5eb55d38af333888604f6b5f0473917c1402b80099dca5cbc207075c0"
+    );
+    decode(nonce, "000000000102030405060708");
+    decode(aad, "f33388860000000000004e91");
+    decode(
+        long_cipher,
+        "64a0861575861af460f062c79be643bd5e805cfd345cf389f108670ac76c8cb24c6cfc18755d43eea09ee94e382d26b0bdb7b73c321b0100d4f03b7f355894cf332f830e710b97ce98c8a84abd0b948114ad176e008d33bd60f982b1ff37c8559797a06ef4f0ef61c186324e2b3506383606907b6a7c02b0f9f6157b53c867e4b9166c767b804d46a59b5216cde7a4e99040c5a40433225ee282a1b0a06c523eaf4534d7f83fa1155b0047718cbc546a0d072b04b3564eea1b422273f548271a0bb2316053fa76991955ebd63159434ecebb4e466dae5a1073a6727627097a1049e617d91d361094fa68f0ff77987130305beaba2eda04df997b714d6c6f2c29a6ad5cb4022b02709beead9d67890cbb22392336fea1851f38"
+    );
+    decode(
+        long_expected,
+        "496e7465726e65742d4472616674732061726520647261667420646f63756d656e74732076616c696420666f722061206d6178696d756d206f6620736978206d6f6e74687320616e64206d617920626520757064617465642c207265706c616365642c206f72206f62736f6c65746564206279206f7468657220646f63756d656e747320617420616e792074696d652e20497420697320696e617070726f70726961746520746f2075736520496e7465726e65742d447261667473206173207265666572656e6365206d6174657269616c206f7220746f2063697465207468656d206f74686572207468616e206173202fe2809c776f726b20696e2070726f67726573732e2fe2809d"
+    );
+    good = chacha20poly1305_open(long_plain, 265, long_cipher, 281, aad, 12, key, nonce, scratch, 40) && same(long_plain, long_expected, 265) && good;
+    good = chacha20poly1305_seal(
+        long_plain,
+        265,
+        long_plain,
+        265,
+        aad,
+        12,
+        key,
+        nonce,
+        scratch,
+        40
+    ) == false && good;
+    println(
+        "Native ChaCha20-Poly1305 two RFC8439 vectors, 186 tamper cases, invalid arguments, bounds and in-place: {}",
+        good
+    );
+    Ok(good.match({true => 0,false => 1}))
+}

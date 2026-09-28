@@ -2,19 +2,22 @@
 
 ## Current implementation checkpoint
 
-Native BLAKE2b is being added with compiler-backed u64 XOR and rotate-right.
-See [the current implementation track](NATIVE_CRYPTO.md) for its contract and
-validation evidence. The numeric audit below records the earlier baseline; the
-companion compiler change addresses only those two u64 operations, not the full
-u32/u64 bitwise, shift and rotate surface.
+Native BLAKE2b, SHA-256, HMAC-SHA256, HKDF-SHA256 and IETF
+ChaCha20-Poly1305 are implemented with functional vector suites. The TLS 1.3
+key schedule and record layer use these primitives. See
+[NATIVE_CRYPTO.md](NATIVE_CRYPTO.md) and [TLS13.md](TLS13.md) for scope and limits.
+The companion compiler change extends the merged u64 XOR/rotate floor with
+u32 operations, unsigned AND and defined logical right shift, and introduces
+borrowed bounded endian cursors in `std.bytes`.
 
+The remaining work below is a roadmap, not a claim that all of libsodium or
+OpenSSL has been replaced.
 
 ## 1. Standard-library/compiler numeric boundary
 
 First provide unsigned u32/u64 AND, OR, XOR, NOT, logical shifts and rotate.
-Specify fixed-width results; NOT must remain within the word width. Specify
-whether out-of-range shifts are rejected or trapped; do not inherit undefined C
-behavior. A sensible strict shift contract is 0 <= count < width. Rotate may
+Specify fixed-width results; NOT must remain within the word width. Logical right shift now returns zero for counts at or beyond the word width;
+it does not inherit undefined C behavior. Rotate may
 reduce count modulo width, with a separate zero-count path to avoid shifting by
 the full width. Wrapping arithmetic already exists in Zen. Generic endian byte/word helpers
 belong in standard byte/numeric utilities, not a broad public crypto API.
@@ -37,12 +40,11 @@ untracked primary-checkout addition, absent from the merged socket/actor tree
 integer SIMD API. Its current numerical test inputs are exactly representable;
 broader NaN/infinity/rounding-error contracts remain separate work.
 
-Both trees contain scalar std math bindings for cos/sin/sqrt/log10/round.
+The earlier pre-PR numeric audit found scalar std math bindings for cos/sin/sqrt/log10/round.
 `std/core/num.zen` defines bounds, widths and conversions; `ast_node.zen` and
 `parse_expr.zen` enumerate arithmetic, comparisons and boolean operators, but
-no integer bitwise/shift/rotate operations. Thus the narrow missing compiler
-floor is evidenced in actual declarations/parser, not inferred from absent
-crypto algorithms. Preserve the existing bulk math; add only the missing
+no integer bitwise/shift/rotate operations. That audit motivated the now-implemented bit operations; it should not be read
+as a description of the current compiler branch. Preserve the existing bulk math; add only the missing
 integer semantics needed by crypto. The comparison candidate also already
 auto-vectorizes on arm64 without a new vector language type.
 
@@ -83,9 +85,9 @@ experiments (including negative controls), but treat them as evidence, not proof
 Require independent security review before replacing the vetted backend by
 default. SIMD is a performance technique, not a side-channel guarantee.
 
-SHA-256 remains a later independent library feature, using FIPS 180-4 and bounded
-streaming state. Validate known answers, padding/length boundaries and chunk
-equivalence; it is not a prerequisite for XChaCha20-Poly1305.
+SHA-256 now has bounded streaming state and known-answer, padding/length-boundary
+and chunk-equivalence tests. It supports TLS 1.3 independently of the remaining
+XChaCha20-Poly1305 work.
 
 ## 3. OS services and secret ownership
 

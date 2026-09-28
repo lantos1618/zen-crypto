@@ -1,0 +1,87 @@
+// Experimental native HKDF-SHA-256, RFC 5869. No secure-erasure guarantee.
+// Scratch is caller-owned, aligned, live, mutually disjoint and separate from
+// every input/output. Extract needs 192 bytes and 72 u32 words; expand needs
+// 256 bytes and 72 words. Extract output may alias inputs. Expand output MUST
+// NOT overlap PRK/info because subsequent blocks read those spans again.
+Ptr = std.mem
+Range = std.core
+to_u64, to_u8 = std.core.num
+hmac_sha256_candidate, hmac_sha256_parts_candidate = hmac_sha256
+
+hkdf_extract_candidate* = (
+    output        : Ptr<u8>,
+    capacity      : usize,
+    salt          : Ptr<u8>,
+    salt_count    : usize,
+    ikm           : Ptr<u8>,
+    ikm_count     : usize,
+    bytes         : Ptr<u8>,
+    byte_capacity : usize,
+    words         : Ptr<u32>,
+    word_count    : usize
+) bool {
+    // Empty HMAC key and HashLen zero bytes have the same padded key block.
+    hmac_sha256_candidate(
+        output,
+        capacity,
+        salt,
+        salt_count,
+        ikm,
+        ikm_count,
+        bytes,
+        byte_capacity,
+        words,
+        word_count
+    )
+}
+
+hkdf_expand_candidate* = (
+    output        : Ptr<u8>,
+    capacity      : usize,
+    output_count  : usize,
+    prk           : Ptr<u8>,
+    prk_count     : usize,
+    info          : Ptr<u8>,
+    info_count    : usize,
+    bytes         : Ptr<u8>,
+    byte_capacity : usize,
+    words         : Ptr<u32>,
+    word_count    : usize
+) bool {
+    valid = output_count <= 8160 && capacity >= output_count && (output_count == 0 || !output.is_null())
+        && prk_count >= 32 && !prk.is_null() && prk_count.to_u64() <= 2305843009213693951
+        && (info_count == 0 || !info.is_null()) && info_count.to_u64() <= 2305843009213693854
+        && byte_capacity >= 256 && !bytes.is_null() && word_count >= 72 && !words.is_null();
+    valid.match({
+        false => false,
+        true  => {
+            previous = bytes.offset(192); counter = bytes.offset(224);
+            done: usize ::= 0; count: usize ::= 0; round: usize ::= 1; good ::= true;
+            (done < output_count && good).loop((loop) {
+                counter.write(0, round.to_u8().value_or(0));
+                good = hmac_sha256_parts_candidate(
+                    previous,
+                    32,
+                    prk,
+                    prk_count,
+                    previous,
+                    count,
+                    info,
+                    info_count,
+                    counter,
+                    1,
+                    bytes,
+                    192,
+                    words,
+                    word_count
+                );
+                good.then(() {
+                    take = (output_count - done < 32).match({true => output_count - done, false => 32});
+                    Range(0, take).loop((i) { output.write(done + i, previous.read(i)); });
+                    done = done + take; count = 32; round = round + 1;
+                });
+            });
+            good
+        },
+    })
+}

@@ -1,0 +1,107 @@
+// Native RFC 2104/RFC 4231 HMAC-SHA-256. Experimental, unaudited.
+// Scratch: 192 bytes plus 72 aligned u32 words, mutually disjoint and disjoint
+// from all spans. Output may alias key/input; it is written after all reads.
+// Scratch retains key material: no secure-erasure guarantee is made.
+Ptr = std.mem
+Range = std.core
+bit_xor, to_u32, to_u64, to_u8 = std.core.num
+sha256_candidate, sha256_init = sha256
+
+hmac_sha256_candidate* = (
+    output        : Ptr<u8>,
+    capacity      : usize,
+    key           : Ptr<u8>,
+    key_count     : usize,
+    input         : Ptr<u8>,
+    count         : usize,
+    bytes         : Ptr<u8>,
+    byte_capacity : usize,
+    words         : Ptr<u32>,
+    word_count    : usize
+) bool {
+    hmac_sha256_parts_candidate(
+        output,
+        capacity,
+        key,
+        key_count,
+        input,
+        count,
+        input,
+        0,
+        input,
+        0,
+        bytes,
+        byte_capacity,
+        words,
+        word_count
+    )
+}
+
+// Three message segments avoid copying handshake or HKDF input into a buffer.
+hmac_sha256_parts_candidate* = (
+    output        : Ptr<u8>,
+    capacity      : usize,
+    key           : Ptr<u8>,
+    key_count     : usize,
+    first         : Ptr<u8>,
+    first_count   : usize,
+    second        : Ptr<u8>,
+    second_count  : usize,
+    third         : Ptr<u8>,
+    third_count   : usize,
+    bytes         : Ptr<u8>,
+    byte_capacity : usize,
+    words         : Ptr<u32>,
+    word_count    : usize
+) bool {
+    valid = capacity >= 32 && !output.is_null() && byte_capacity >= 192 && !bytes.is_null()
+        && word_count >= 72 && !words.is_null() && (key_count == 0 || !key.is_null())
+        && (first_count == 0 || !first.is_null()) && (second_count == 0 || !second.is_null())
+        && (third_count == 0 || !third.is_null()) && key_count.to_u64() <= 2305843009213693951
+        && first_count.to_u64() <= 2305843009213693887
+        && second_count.to_u64() <= 2305843009213693887 - first_count.to_u64()
+        && third_count.to_u64() <= 2305843009213693887 - first_count.to_u64() - second_count.to_u64();
+    valid.match({
+        false => false,
+        true  => {
+            pad = bytes; block = bytes.offset(64); inner = bytes.offset(128);
+            normalized: usize ::= key_count;
+            ready             ::= true;
+            (key_count > 64).match({
+                true  => {
+                    ready      = sha256_candidate(
+                        pad,
+                        64,
+                        key,
+                        key_count,
+                        block,
+                        64,
+                        words,
+                        word_count
+                    );
+                    normalized = 32;
+                },
+                false => Range(0, key_count).loop((i) { pad.write(i, key.read(i)); }),
+            });
+            Range(normalized, 64).loop((i) { pad.write(i, 0); });
+            Range(0, 64).loop((i) { pad.write(i, pad.read(i).to_u32().bit_xor(54).to_u8().value_or(0)); });
+            ready = ready && sha256_init(words, word_count, block, 64).match({
+                None        => false,
+                Ok(initial) => {
+                    state ::= initial;
+                    state.update(pad, 64) && state.update(first, first_count)
+                        && state.update(second, second_count) && state.update(third, third_count)
+                        && state.finish(inner, 32)
+                },
+            });
+            Range(0, 64).loop((i) { pad.write(i, pad.read(i).to_u32().bit_xor(106).to_u8().value_or(0)); });
+            ready && sha256_init(words, word_count, block, 64).match({
+                None        => false,
+                Ok(initial) => {
+                    state ::= initial;
+                    state.update(pad, 64) && state.update(inner, 32) && state.finish(output, capacity)
+                },
+            })
+        },
+    })
+}

@@ -1,0 +1,255 @@
+// Experimental external-PSK TLS 1.3 one-round-trip profile. Cipher 0x1303,
+// psk_ke only: no certificates, (EC)DHE, HRR, early data or session tickets.
+// The caller owns the connected socket, configures I/O deadlines, and supplies
+// fresh cryptographically random 32 bytes for each handshake. Blocking I/O.
+// Receives one application record, not a general streaming TLS connection.
+Alloc, AllocError, Ptr, null_ptr = std.mem
+SocketFd = std.net.socket
+ByteReader, ByteWriter, ByteError = std.bytes
+sha256_candidate = sha256
+tls13_binder, tls13_handshake_secrets, tls13_application_secrets, tls13_traffic_keys, tls13_finished, tls13_seal, tls13_open = tls13
+Tls13ClientError* = Invalid | Io | Protocol | Authentication | Limit
+read_exact = (
+    socket : SocketFd,
+    bytes  : Ptr<u8>,
+    count  : usize
+) Res<(), Tls13ClientError> {
+    offset ::= 0;
+    loop(() { offset < count }, (h) {
+        n = socket.recv(
+            bytes.offset(offset),
+            count - offset
+        ).try(Tls13ClientError.Io);
+        (n > 0).ensure(Tls13ClientError.Io).try(); offset = offset + n;
+    }); Ok(())
+}
+write_all = (
+    socket : SocketFd,
+    bytes  : Ptr<u8>,
+    count  : usize
+) Res<(), Tls13ClientError> {
+    offset ::= 0;
+    loop(() { offset < count }, (h) {
+        n = socket.send(
+            bytes.offset(offset),
+            count - offset,
+            0
+        ).try(Tls13ClientError.Io);
+        (n > 0).ensure(Tls13ClientError.Io).try(); offset = offset + n;
+    }); Ok(())
+}
+read_record = (socket: SocketFd, record: Ptr<u8>) Res<usize, Tls13ClientError> {
+    read_exact(socket, record, 5).try();
+    (record.read(1) == 3 && record.read(2) == 3).ensure(Tls13ClientError.Protocol).try();
+    count = record.read(3).to_usize() * 256 + record.read(4).to_usize();
+    (count > 0 && count <= 16640 && (record.read(0) != 22 || count <= 16384)).ensure(Tls13ClientError.Limit).try();
+    read_exact(socket, record.offset(5), count).try(); Ok(count + 5)
+}
+be24 = (p: Ptr<u8>) usize { p.read(0).to_usize() * 65536 + p.read(1).to_usize() * 256 + p.read(2).to_usize() }
+append = (
+    target : Ptr<u8>,
+    at     : usize,
+    input  : Ptr<u8>,
+    count  : usize
+) Res<usize, Tls13ClientError> {
+    (at <= 65536 && count <= 65536 - at).ensure(Tls13ClientError.Limit).try();
+    (count > 0).then(() { target.offset(at).copy_from(input, count); }); Ok(at + count)
+}
+hash = (
+    out   : Ptr<u8>,
+    bytes : Ptr<u8>,
+    count : usize,
+    work  : Ptr<u8>,
+    words : Ptr<u32>
+) Res<(), Tls13ClientError> {
+    sha256_candidate(out, 32, bytes, count, work, 64, words, 72).ensure(Tls13ClientError.Invalid)
+}
+// Full-length comparison; generated code has not had a side-channel audit.
+equal32 = (left: Ptr<u8>, right: Ptr<u8>) bool {
+    differences: usize ::= 0;
+    Range(0, 32).loop((i) { differences = differences + (left.read(i) == right.read(i)).match({true => 0, false => 1}); });
+    differences == 0
+}
+server_hello = (message: Ptr<u8>, count: usize) Res<(), Tls13ClientError
+    | ByteError> {
+    reader ::= ByteReader.open(message, count).try();
+    (reader.read_be(1).try() == 2 && reader.read_be(3).try() == (count - 4).to_u64() && reader.read_be(2).try() == 771).ensure(Tls13ClientError.Protocol).try();
+    random   = reader.take(32).try();
+    hrr: str = "cf21ad74e59a6111be1d8c021e65b891c2a211167abb8c5e079e09e2c8a8339c";
+    retry ::= true;
+    Range(0, 32).loop((i) {
+        high = hrr.ptr().read(i * 2); low = hrr.ptr().read(i * 2 + 1);
+        first  = (high <= 57).match({true => high - 48, false => high - 87});
+        second = (low <= 57).match({true => low - 48, false => low - 87});
+        retry  = retry && random.ptr().read(i) == first * 16 + second;
+    });
+    (!retry).ensure(Tls13ClientError.Protocol).try();
+    (reader.read_be(1).try() == 0 && reader.read_be(2).try() == 4867 && reader.read_be(1).try() == 0).ensure(Tls13ClientError.Protocol).try();
+    ext_count = reader.read_be(2).try().to_usize().ok_or(Tls13ClientError.Limit).try();
+    (ext_count == reader.remaining()).ensure(Tls13ClientError.Protocol).try();
+    version ::= false; selected ::= false;
+    loop(() { reader.remaining() > 0 }, (h) {
+        kind = reader.read_be(2).try(); length = reader.read_be(2).try();
+        (length == 2).ensure(Tls13ClientError.Protocol).try(); value = reader.read_be(2).try();
+        kind.match({
+            43 => { (!version && value == 772).ensure(
+                Tls13ClientError.Protocol
+            ).try(); version = true; },
+            41 => { (!selected && value == 0).ensure(
+                Tls13ClientError.Protocol
+            ).try(); selected = true; },
+            _  => Err(Tls13ClientError.Protocol).try(),
+        });
+    });
+    (version && selected).ensure(Tls13ClientError.Protocol)
+}
+tls13_psk_round_trip* = (a: Alloc, socket: SocketFd, identity: str, psk: Ptr<u8>, psk_count: usize, random: Ptr<u8>, request: Ptr<u8>, request_count: usize, response: Ptr<u8>, response_capacity: usize) Res<usize, Tls13ClientError
+    | AllocError> {
+    (!psk.is_null() && psk_count > 0 && !random.is_null() && identity.len > 0 && identity.len <= 255 && request_count <= 16384 && (request_count == 0 || !request.is_null()) && !response.is_null()).ensure(
+        Tls13ClientError.Invalid
+    ).try();
+    memory = a.realloc<u8>(null_ptr<u8>(), 180000).try(); @scope.defer(() { a.free(memory); });
+    scratch = a.realloc<u64>(null_ptr<u64>(), 4096).try(); @scope.defer(() { a.free(scratch); });
+    record = memory; plain = memory.offset(17000); pending = memory.offset(34000); transcript = memory.offset(100000);
+    schedule = memory.offset(166000); app = memory.offset(166200); keys = memory.offset(166400); digest = memory.offset(166600); verify = memory.offset(166700); hash_work = memory.offset(167000); hash_words = memory.offset(167104).to<u32>();
+    ch_count = 107 + identity.len;
+    writer ::= ByteWriter.open(
+        transcript,
+        ch_count
+    ).try(Tls13ClientError.Invalid);
+    writer.write_be(1, 1).try(Tls13ClientError.Invalid); writer.write_be((ch_count - 4).to_u64(), 3).try(Tls13ClientError.Invalid);
+    writer.write_be(771, 2).try(Tls13ClientError.Invalid);
+    Range(0, 32).loop((i) { writer.write_be(random.read(i).to_u64(), 1).try(Tls13ClientError.Invalid); });
+    writer.write_be(0, 1).try(Tls13ClientError.Invalid); writer.write_be(2, 2).try(Tls13ClientError.Invalid); writer.write_be(4867, 2).try(Tls13ClientError.Invalid);
+    writer.write_be(1, 1).try(Tls13ClientError.Invalid); writer.write_be(0, 1).try(Tls13ClientError.Invalid);
+    writer.write_be(
+        (60 + identity.len).to_u64(),
+        2
+    ).try(Tls13ClientError.Invalid);
+    writer.write_be(43, 2).try(Tls13ClientError.Invalid); writer.write_be(3, 2).try(Tls13ClientError.Invalid); writer.write_be(2, 1).try(Tls13ClientError.Invalid); writer.write_be(772, 2).try(Tls13ClientError.Invalid);
+    writer.write_be(45, 2).try(Tls13ClientError.Invalid); writer.write_be(2, 2).try(Tls13ClientError.Invalid); writer.write_be(1, 1).try(Tls13ClientError.Invalid); writer.write_be(0, 1).try(Tls13ClientError.Invalid);
+    writer.write_be(41, 2).try(Tls13ClientError.Invalid); writer.write_be((43 + identity.len).to_u64(), 2).try(Tls13ClientError.Invalid);
+    writer.write_be((6 + identity.len).to_u64(), 2).try(Tls13ClientError.Invalid); writer.write_be(identity.len.to_u64(), 2).try(Tls13ClientError.Invalid);
+    Range(0, identity.len).loop((i) { writer.write_be(identity.ptr().read(i).to_u64(), 1).try(Tls13ClientError.Invalid); });
+    writer.write_be(0, 4).try(Tls13ClientError.Invalid);
+    hash(digest, transcript, writer.written(), hash_work, hash_words).try();
+    tls13_binder(verify, 32, psk, psk_count, digest, scratch, 4096).ensure(Tls13ClientError.Invalid).try();
+    writer.write_be(33, 2).try(Tls13ClientError.Invalid); writer.write_be(32, 1).try(Tls13ClientError.Invalid);
+    Range(0, 32).loop((i) { writer.write_be(verify.read(i).to_u64(), 1).try(Tls13ClientError.Invalid); });
+    (writer.written() == ch_count).ensure(Tls13ClientError.Invalid).try();
+    record.write(0, 22); record.write(1, 3); record.write(2, 1);
+    record.write(3, (ch_count / 256).to_u8().ok_or(Tls13ClientError.Invalid).try()); record.write(4, (ch_count % 256).to_u8().ok_or(Tls13ClientError.Invalid).try());
+    record.offset(5).copy_from(transcript, ch_count); write_all(socket, record, ch_count + 5).try();
+    transcript_count ::= ch_count; pending_count ::= 0; records ::= 0; ccs ::= 0; hello ::= false;
+    loop(() { !hello }, (h) {
+        records = records + 1; (records <= 64).ensure(
+            Tls13ClientError.Limit
+        ).try();
+        size = read_record(socket, record).try();
+        (record.read(0) == 22).ensure(Tls13ClientError.Protocol).try();
+        pending_count = append(
+            pending,
+            pending_count,
+            record.offset(5),
+            size - 5
+        ).try();
+        (pending_count >= 4).then(() {
+            total = be24(pending.offset(1)) + 4; (total <= 65536).ensure(Tls13ClientError.Limit).try();
+            (pending_count >= total).then(() {
+                (pending_count == total).ensure(
+                    Tls13ClientError.Protocol
+                ).try();
+                server_hello(pending, total).try(Tls13ClientError.Protocol);
+                transcript_count = append(
+                    transcript,
+                    transcript_count,
+                    pending,
+                    total
+                ).try(); hello = true; pending_count = 0;
+            });
+        });
+    });
+    hash(digest, transcript, transcript_count, hash_work, hash_words).try();
+    tls13_handshake_secrets(schedule, 128, psk, psk_count, digest, scratch, 4096).ensure(Tls13ClientError.Invalid).try();
+    tls13_traffic_keys(keys, 44, schedule.offset(96), scratch, 4096).ensure(Tls13ClientError.Invalid).try();
+    stage ::= 0; sequence: u64 ::= 0;
+    loop(() { stage < 2 }, (h) {
+        records = records + 1; (records <= 64).ensure(
+            Tls13ClientError.Limit
+        ).try();
+        size = read_record(socket, record).try();
+        (record.read(0) == 20).match({
+            true  => { ccs = ccs + 1; (ccs <= 2 && size == 6 && record.read(5) == 1).ensure(Tls13ClientError.Protocol).try(); },
+            false => {
+                part = tls13_open(
+                    plain,
+                    17000,
+                    record,
+                    size,
+                    keys,
+                    keys.offset(32),
+                    sequence,
+                    scratch,
+                    4096
+                ).try(Tls13ClientError.Authentication); sequence = sequence + 1;
+                (part.kind == 22).ensure(Tls13ClientError.Protocol).try(); pending_count = append(pending, pending_count, plain, part.count).try();
+                parsing ::= true;
+                loop(() { parsing && pending_count >= 4 }, (h) {
+                    total = be24(pending.offset(1)) + 4; (total <= 65536).ensure(Tls13ClientError.Limit).try();
+                    (pending_count < total).match({true => { parsing = false; }, false => {
+                        stage.match({
+                            0 => { (total == 6 && pending.read(0) == 8 && pending.read(4) == 0 && pending.read(5) == 0).ensure(Tls13ClientError.Protocol).try(); stage = 1; },
+                            1 => {
+                                (total == 36 && pending.read(0) == 20).ensure(Tls13ClientError.Protocol).try();
+                                hash(
+                                    digest,
+                                    transcript,
+                                    transcript_count,
+                                    hash_work,
+                                    hash_words
+                                ).try();
+                                tls13_finished(verify, 32, schedule.offset(96), digest, scratch, 4096).ensure(Tls13ClientError.Invalid).try();
+                                equal32(verify, pending.offset(4)).ensure(Tls13ClientError.Authentication).try(); stage = 2;
+                            },
+                            _ => Err(Tls13ClientError.Protocol).try(),
+                        });
+                        transcript_count = append(
+                            transcript,
+                            transcript_count,
+                            pending,
+                            total
+                        ).try();
+                        pending_count    = pending_count - total;
+                        Range(0, pending_count).loop((i) { pending.write(i, pending.read(total + i)); });
+                    }});
+                });
+            },
+        });
+    });
+    (pending_count == 0).ensure(Tls13ClientError.Protocol).try();
+    hash(digest, transcript, transcript_count, hash_work, hash_words).try();
+    tls13_application_secrets(app, 96, schedule.offset(32), digest, scratch, 4096).ensure(Tls13ClientError.Invalid).try();
+    tls13_finished(verify, 32, schedule.offset(64), digest, scratch, 4096).ensure(Tls13ClientError.Invalid).try();
+    plain.write(0, 20); plain.write(1, 0); plain.write(2, 0); plain.write(3, 32); plain.offset(4).copy_from(verify, 32);
+    tls13_traffic_keys(keys, 44, schedule.offset(64), scratch, 4096).ensure(Tls13ClientError.Invalid).try();
+    size ::= tls13_seal(record, 17000, plain, 36, 22, keys, keys.offset(32), 0, scratch, 4096).try(Tls13ClientError.Invalid); write_all(socket, record, size).try();
+    tls13_traffic_keys(keys, 44, app.offset(32), scratch, 4096).ensure(Tls13ClientError.Invalid).try();
+    size = tls13_seal(record, 17000, request, request_count, 23, keys, keys.offset(32), 0, scratch, 4096).try(Tls13ClientError.Invalid); write_all(socket, record, size).try();
+    tls13_traffic_keys(keys, 44, app.offset(64), scratch, 4096).ensure(Tls13ClientError.Invalid).try();
+    size = read_record(socket, record).try();
+    part = tls13_open(
+        plain,
+        17000,
+        record,
+        size,
+        keys,
+        keys.offset(32),
+        0,
+        scratch,
+        4096
+    ).try(Tls13ClientError.Authentication);
+    (part.kind == 23 && part.count <= response_capacity).ensure(
+        Tls13ClientError.Protocol
+    ).try();
+    (part.count > 0).then(() { response.copy_from(plain, part.count); }); Ok(part.count)
+}

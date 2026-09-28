@@ -11,8 +11,17 @@ that generated backend output is distinct from calling an external crypto librar
 - `equal_bytes_candidate = crypto`: a byte-comparison candidate, without a
   constant-time guarantee across compiler versions, architectures or callers.
 
-These are experimental implementations. Native TLS, XChaCha20-Poly1305, X25519
-and HMAC are not implemented here yet. No independent security audit or production
+- `Sha256`, `sha256_candidate = sha256`: incremental and one-shot SHA-256.
+- `hmac_sha256_candidate = hmac_sha256`, `hkdf_extract_candidate`,
+  `hkdf_expand_candidate = hkdf`: SHA-256 HMAC and HKDF.
+- `chacha20poly1305_seal`, `chacha20poly1305_open = chacha20poly1305`:
+  IETF ChaCha20-Poly1305 with a 12-byte nonce and 16-byte tag.
+- `tls13`: SHA-256 TLS 1.3 key schedule and ChaCha20-Poly1305 records.
+- `tls13_psk_round_trip = tls13_client`: bounded external-PSK TLS 1.3 client
+  exchange, tested against OpenSSL and an independent fragmented peer.
+
+These are experimental implementations. XChaCha20-Poly1305, X25519 and
+certificate-based native TLS are not implemented here yet. No independent security audit or production
 side-channel guarantee is claimed. See [the native implementation track](docs/NATIVE_CRYPTO.md).
 
 ## Backend packages and migration
@@ -30,12 +39,14 @@ Update explicit build dependencies and include paths to the new packages.
 The module names `sodium` and `tls` are retained there. No compatibility forwarding
 modules remain here: importing this package does not silently pull in a backend.
 `zen-http` uses `zen-openssl` for working TLS. This separation does not implement
-native Zen TLS or remove OpenSSL from HTTPS applications.
+certificate-based native TLS or remove OpenSSL from HTTPS applications.
 
 ## Build and test without crypto backends
 
-Use a compiler and standard library from the same Zen main revision at or after
-`b107afe5`, which includes native u64 XOR and rotate-right (PR #6). From this repo:
+Use matching compiler and standard library builds with u32/u64 XOR, AND,
+rotate-right and logical right shift, plus `std.bytes`. These additions are in
+[Zen PR #8](https://github.com/lantos1618/zen/pull/8), commit `64942424`; older main `b107afe5` only supports the
+BLAKE2b subset. From this repo:
 
 ```sh
 ZEN_COMPILER=/path/to/zen/zen ZEN_STD=/path/to/zen/src scripts/check.sh
@@ -43,8 +54,8 @@ ZEN_STD=/path/to/zen/src /path/to/zen/zen build test-blake2b
 build/test-blake2b
 ```
 
-The normal checks build native comparison and BLAKE2b without external crypto
-headers or libraries. The BLAKE2b standalone check runs nine known answers,
+The normal checks build comparison, BLAKE2b, SHA-256/HMAC/HKDF and
+ChaCha20-Poly1305 without external crypto headers or libraries. The BLAKE2b standalone check runs nine known answers,
 inspects unresolved symbols and rejects a deliberate IV-bitflip negative control.
 `CC` and `PYTHON` can override the BLAKE2b test toolchain. Defaults use a sibling
 `zen-actor-runtime` compiler checkout; build products are ignored under `build/`.
@@ -87,3 +98,10 @@ certification or a performance ranking. [Evidence and limits](docs/NATIVE_CRYPTO
 The comparison candidate has been inspected in optimized arm64 output, but it
 has no portable constant-time guarantee. OS entropy, secure erasure and secret
 ownership are separate requirements; `std.core.rand` is not a cryptographic RNG.
+
+## Native TLS work
+
+The TLS implementation and its supported profile are described in
+[Native TLS 1.3](docs/TLS13.md). OpenSSL is a reference peer for interoperability
+tests, not linked into the native client. Existing zen-http HTTPS still uses
+zen-openssl. No native TLS performance advantage has been measured.

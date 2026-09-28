@@ -1,0 +1,33 @@
+Socket, SocketFault = std.net.socket
+tls13_psk_round_trip, Tls13ClientError = tls13_client
+main = (env: Env) Res<i32, AllocError | SocketFault> {
+    a     = env.mem.alloc();
+    bytes = a.realloc<u8>(null_ptr<u8>(), 17000).try();
+    psk   = bytes; random = bytes.offset(32); output = bytes.offset(64);
+    Range(0, 32).loop((i) { psk.write(i, i.to_u8().match({Ok(v) => v, None => 0})); });
+    Range(0, 16384).loop((i) { output.write(i, 165); });
+    // RANDOM
+    socket ::= Socket.tcp_connect(a, "127.0.0.1", TEST_PORT).try();
+    request: str = "native zen\n";
+    good         = tls13_psk_round_trip(
+        a,
+        socket.handle(),
+        "ZenTest",
+        psk,
+        32,
+        random,
+        request.ptr(),
+        request.len,
+        output,
+        16384
+    ).match({
+        Ok(count) => {
+            expected: str = "nez evitan\n";
+            same ::= count == expected.len;
+            Range(0, count).loop((i) { same = same && output.read(i) == expected.ptr().read(i); });
+            println("application authenticated: {}", same); same
+        },
+        Err(_)    => { unchanged ::= true; Range(0, 16384).loop((i) { unchanged = unchanged && output.read(i) == 165; }); println("handshake rejected; output unchanged: {}", unchanged); false },
+    });
+    socket.close(); Ok(good.match({true => 0, false => 1}))
+}

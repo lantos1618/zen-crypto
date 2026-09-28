@@ -1,0 +1,2 @@
+# Reference AEAD for tests/check_tls13.py only; not a Zen runtime dependency.
+cryptography>=42

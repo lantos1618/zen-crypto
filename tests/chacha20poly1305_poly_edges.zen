@@ -1,0 +1,108 @@
+// RFC8439 AppendixA.3 cases5..11 directly exercise rare Poly1305 carries.
+// Values verified against https://www.rfc-editor.org/rfc/rfc8439.txt.
+// The native runner appends this test to a temporary copy of the module so its
+// private arithmetic can be checked without exporting a raw authenticator API.
+edge_nibble = (b:u8) u8 { (b<=57).match({true=>b-48,false=>b-87}) }
+edge_decode = (out:Ptr<u8>, text:str) () {
+    Range(0, text.len/2).loop((i) { out.write(i, edge_nibble(text.ptr().read(2*i))*16+edge_nibble(text.ptr().read(2*i+1))); });
+}
+edge_case = (
+    p           :Ptr<u64>,
+    key         :Ptr<u8>,
+    message     :Ptr<u8>,
+    expected    :Ptr<u8>,
+    tag         :Ptr<u8>,
+    key_hex     :str,
+    message_hex :str,
+    tag_hex     :str
+) bool {
+    edge_decode(key, key_hex); edge_decode(message, message_hex); edge_decode(expected, tag_hex);
+    p.write(0, load32(key, 0).to_u64()%67108864); p.write(1, load32(key, 3).to_u64()/4%67108864);
+    p.write(2, load32(key, 6).to_u64()/16%67108864); p.write(3, load32(key, 9).to_u64()/64%67108864);
+    p.write(4, load32(key, 12).to_u64()/256);
+    Range(0, 5).loop((i) { p.write(5+i, 0); });
+    Range(0, 4).loop((i) { p.write(10+i, load32(key, 16+4*i).to_u64()); });
+    Range(0, message_hex.len/32).loop((i) { poly_block(p, message.offset(i*16)); });
+    poly_finish(p, tag);
+    good ::= true; Range(0, 16).loop((i) { good = (tag.read(i)==expected.read(i)) && good; });
+    (!good).then(
+        () { println("Poly edge failed key={} data={} expected={}", key_hex, message_hex, tag_hex); Range(0, 16).loop((i) { println("byte {} got={} expected={}", i, tag.read(i), expected.read(i)); }); }
+    ); good
+}
+main = (env:Env) Res<i32,AllocError> {
+    a =env.mem.alloc(); p=a.realloc<u64>(null_ptr<u64>(), 14).try();
+    data =a.realloc<u8>(null_ptr<u8>(), 128).try(); key=data; message=data.offset(32); expected=data.offset(96); tag=data.offset(112);
+    good ::= true;
+    good = edge_case(
+        p,
+        key,
+        message,
+        expected,
+        tag,
+        "0200000000000000000000000000000000000000000000000000000000000000",
+        "ffffffffffffffffffffffffffffffff",
+        "03000000000000000000000000000000"
+    ) && good;
+    good = edge_case(
+        p,
+        key,
+        message,
+        expected,
+        tag,
+        "02000000000000000000000000000000ffffffffffffffffffffffffffffffff",
+        "02000000000000000000000000000000",
+        "03000000000000000000000000000000"
+    ) && good;
+    good = edge_case(
+        p,
+        key,
+        message,
+        expected,
+        tag,
+        "0100000000000000000000000000000000000000000000000000000000000000",
+        "fffffffffffffffffffffffffffffffff0ffffffffffffffffffffffffffffff11000000000000000000000000000000",
+        "05000000000000000000000000000000"
+    ) && good;
+    good = edge_case(
+        p,
+        key,
+        message,
+        expected,
+        tag,
+        "0100000000000000000000000000000000000000000000000000000000000000",
+        "fffffffffffffffffffffffffffffffffbfefefefefefefefefefefefefefefe01010101010101010101010101010101",
+        "00000000000000000000000000000000"
+    ) && good;
+    good = edge_case(
+        p,
+        key,
+        message,
+        expected,
+        tag,
+        "0200000000000000000000000000000000000000000000000000000000000000",
+        "fdffffffffffffffffffffffffffffff",
+        "faffffffffffffffffffffffffffffff"
+    ) && good;
+    good = edge_case(
+        p,
+        key,
+        message,
+        expected,
+        tag,
+        "0100000000000000040000000000000000000000000000000000000000000000",
+        "e33594d7505e43b900000000000000003394d7505e4379cd01000000000000000000000000000000000000000000000001000000000000000000000000000000",
+        "14000000000000005500000000000000"
+    ) && good;
+    good = edge_case(
+        p,
+        key,
+        message,
+        expected,
+        tag,
+        "0100000000000000040000000000000000000000000000000000000000000000",
+        "e33594d7505e43b900000000000000003394d7505e4379cd010000000000000000000000000000000000000000000000",
+        "13000000000000000000000000000000"
+    ) && good;
+    println("Poly1305 RFC8439 seven reduction/carry edge vectors: {}", good);
+    Ok(good.match({true=>0,false=>1}))
+}
