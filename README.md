@@ -191,8 +191,9 @@ or tree mode. It is not an audited replacement for production keyed hashing.
 See [the implementation and validation contract](docs/NATIVE_CRYPTO.md).
 
 Compiler prerequisite: [Zen PR #6](https://github.com/lantos1618/zen/pull/6),
-commit `6c2aa6542d1acdd3e1bf233d844ad20200110fa8`. It is published but not yet
-merged into compiler `main`. Build that revision using the compiler's bootstrap
+merged into compiler `main` as `27275e04`. Compiler main at `b107afe5`
+includes both numeric primitives and std readiness. Build that revision (or a
+later descendant) using the compiler's bootstrap
 instructions and point both compiler and standard-library paths at that checkout:
 
 ```sh
@@ -203,5 +204,7 @@ build/test-blake2b
 
 The differential command requires the existing pinned libsodium build (or
 `SODIUM_PREFIX`); the standalone build target needs no crypto dependency.
-The tested compiler prerequisite passes focused checks and bootstrap fixpoint;
-its full aggregate remains blocked by the documented warning-budget failure.
+The tested compiler prerequisite passes focused checks and bootstrap fixpoint.
+Both compiler PRs passed GitHub verification before merge. The earlier local
+macOS aggregate hit a warning-budget mismatch; that historical limitation is
+retained in the PR validation notes.
