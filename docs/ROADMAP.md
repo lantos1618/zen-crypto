@@ -17,25 +17,66 @@ code on supported backends. Standard-library declarations alone cannot invent
 primitive integer instructions absent from the language's compiler lowering.
 Do not add handwritten C snippets to zen-crypto to bypass that design work.
 
-`std.math.vector` currently contains f64 dot/squared-distance kernels whose
-loops permit backend auto-vectorization. It does not expose integer vector
-operations needed by crypto. The comparison candidate already auto-vectorizes
-on this arm64 toolchain; no special SIMD API was needed for that operation.
+Workspace audit (2026-09-28): the primary `zen/src/std/math/vector.zen`
+contains allocation-free f64 `dot` and `squared_distance`, using four independent
+accumulators for backend SIMD. Its focused `tests/library/vector` harness covers
+lengths 0..1024, tails, offset pointers and aliasing, includes a deliberately
+broken-kernel control, ASan/UBSan compilation, and checks arm64 vector multiply
+instructions. This is real existing work to preserve and upstream, but is an
+untracked primary-checkout addition, absent from the merged socket/actor tree
+`zen-actor-runtime` at 2a40b9ce. Do not describe it as already merged or a general
+integer SIMD API. Its current numerical test inputs are exactly representable;
+broader NaN/infinity/rounding-error contracts remain separate work.
+
+Both trees contain scalar std math bindings for cos/sin/sqrt/log10/round.
+`std/core/num.zen` defines bounds, widths and conversions; `ast_node.zen` and
+`parse_expr.zen` enumerate arithmetic, comparisons and boolean operators, but
+no integer bitwise/shift/rotate operations. Thus the narrow missing compiler
+floor is evidenced in actual declarations/parser, not inferred from absent
+crypto algorithms. Preserve the existing bulk math; add only the missing
+integer semantics needed by crypto. The comparison candidate also already
+auto-vectorizes on arm64 without a new vector language type.
+
+The merged `std.mem.Pool`, `PoolAlloc`, `PoolPolicy`, and `PoolStats` provide
+exact-size reuse, bounded retained cache and immutable telemetry. Focused gates
+cover realloc preservation, native OOM/overflow, limits, teardown and negative
+controls. Reuse this Alloc interface for scratch storage. It is externally
+serialized, libc-backed, supports alignment through 16 bytes, and neither wipes
+secrets nor locks pages. A pool therefore complements secret ownership rather
+than replacing its erasure/copy contracts.
 
 ## 2. Algorithms belong in zen-crypto
 
-After integer primitives land, implement portable SHA-256 from FIPS 180-4 with
-explicit state ownership and bounded reusable workspace. Validate known answers
-for empty input, abc, multi-block data and one million a bytes; padding lengths
-55, 56, 63, 64 and 65; streaming chunk equivalence; finalization and length
-overflow. Compare against an independent established implementation. Hashing is
-not encryption, authentication, or a password-storage scheme.
+The current encryption backend is libsodium; native replacements are opt-in
+research until the gates below pass. Prioritize XChaCha20-Poly1305 compatibility
+with that backend: a portable ChaCha20/HChaCha20 reference, Poly1305 arithmetic,
+then the combined AEAD construction. Implement the specified construction rather
+than designing a new cipher or handshake. Fixed-width integer operations and
+endian helpers should come from std; algorithm state belongs here.
 
-Only then benchmark. Distinguish generic SIMD from Apple/ARM SHA instructions.
-Consider independent-message batching before complicated single-message SIMD.
-Keep a portable reference and compare optimized outputs. Feature detection and
-unsupported-target fallback must be explicit. Constant-time checks must cover
-the exact optimized build, with no claim that a timing test proves security.
+Acceptance requires independent known-answer vectors and differential tests
+against libsodium for empty messages/AD, byte and block boundaries, long messages,
+all tag-byte corruptions, altered AD/nonces/keys, malformed/truncated ciphertext,
+nonce/counter exhaustion, and overlap contracts. Reject failed authentication
+without releasing unauthenticated plaintext. Reusable caller-owned scratch and
+secret cleanup must be tested across error paths as well as success.
+
+Only then optimize using integer SIMD. Keep the portable implementation as a
+reference, gate CPU features explicitly, and compare every optimized output.
+Benchmark realistic voice packet sizes separately from large buffers; report
+latency distributions, throughput and allocations. Do not turn faster arithmetic
+into a claim that the whole app or network protocol is constant-time.
+
+Constant-time review must inspect the exact optimized binaries on each supported
+architecture/toolchain for secret-dependent branches, addresses, table lookups,
+variable-time instructions and compiler-introduced helpers. Add timing-statistics
+experiments (including negative controls), but treat them as evidence, not proof.
+Require independent security review before replacing the vetted backend by
+default. SIMD is a performance technique, not a side-channel guarantee.
+
+SHA-256 remains a later independent library feature, using FIPS 180-4 and bounded
+streaming state. Validate known answers, padding/length boundaries and chunk
+equivalence; it is not a prerequisite for XChaCha20-Poly1305.
 
 ## 3. OS services and secret ownership
 
@@ -44,11 +85,14 @@ consumer-facing cryptographic RNG API can live in zen-crypto. Never silently
 fall back to std.core.rand. Surface entropy-source failure, including partial
 reads. Apple system RNG bindings are distinct from hashing or DSP math.
 
-Design non-copying secret ownership before introducing keys: normal arenas and
+Design a non-copying secret-owner abstraction before broadening the low-level
+caller-owned libsodium bindings: normal arenas and
 actor payload copying can duplicate secrets. Secure erasure needs compiler/OS
 semantics resistant to dead-store elimination; ordinary zero writes are not a
 secure wipe. Locked pages, dumps, swapping and actor transport require separate
-contracts. No secret-buffer implementation is included in this milestone.
+contracts. The current binding supplies sodium_memzero, not a comprehensive locked-page or
+non-copyable secret-buffer abstraction. Compile-time paired-build PSKs remain in
+application artifacts; runtime erasure cannot erase those original copies.
 
 ## Acceptance gates
 
@@ -57,3 +101,27 @@ allocation/lifetime tests; optimized assembly review per supported build;
 reproducible benchmarks; then independent security review before production use.
 Do not create new encryption protocols or advertise audited cryptography from a
 small local test suite.
+
+## Tooling split
+
+Use [ASan](https://clang.llvm.org/docs/AddressSanitizer.html) for memory-access
+errors and [UBSan](https://clang.llvm.org/docs/UndefinedBehaviorSanitizer.html)
+for undefined operations in emitted code. Use separate
+[TSan](https://clang.llvm.org/docs/ThreadSanitizer.html) builds for actor races;
+LLVM lists Darwin arm64 support. Validate each sanitizer runtime with a known
+failing control on the actual host, and report unavailable/timed-out runs as
+unverified. Sanitizers are bug finders, not constant-time checks; prebuilt
+uninstrumented library internals are outside full instrumentation coverage.
+
+[dudect](https://github.com/oreparaz/dudect) supplies statistical timing tests,
+but its upstream `cpucycles()` currently uses x86 `_mm_mfence`/`__rdtsc`.
+Running that exact harness on Apple arm64 needs an explicitly validated timing
+port; otherwise run its native x86 build in Linux CI and separately assess the
+actual arm64 artifact. Do not claim portable dudect coverage merely because
+emitted Zen code compiles as C.
+
+[ctgrind](https://github.com/agl/ctgrind) checks secret-tainted control/address
+flows through Valgrind. Upstream [Valgrind platforms](https://valgrind.org/info/platforms.html)
+include ARM64 Linux, but no ARM64 Darwin. Plan a Linux check for this analysis;
+it does not substitute for macOS arm64 optimized-assembly inspection. None of
+these tools alone establishes side-channel safety.

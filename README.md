@@ -1,9 +1,54 @@
 # zen-crypto
 
-Experimental, pure Zen byte primitives for a future crypto library. **No hash,
-encryption, signatures, key generation, or production-ready cryptography is
-implemented yet.** There are no handwritten C algorithm wrappers and no compiler
-or standard-library changes in this package.
+Zen cryptography interfaces with a vetted libsodium backend, alongside an
+experimental pure Zen byte-comparison candidate. Production encryption uses
+libsodium; the candidate is not used for security decisions. No handwritten C
+wrappers or compiler changes are needed.
+
+## Native backend
+
+`src/sodium.zen` binds `sodium.h` directly. Import `Sodium, initialize = sodium`.
+It exposes XChaCha20-Poly1305 AEAD, `crypto_kx` directional X25519 session keys,
+keyed BLAKE2b, HMAC-SHA512/256 authentication, OS-backed random bytes,
+constant-time comparison and explicit zeroization. `initialize()` must succeed
+before use. All buffers are borrowed synchronously and provided by the caller;
+there is no allocation or ownership transfer in these binding functions.
+
+Use 32-byte AEAD/session/auth keys, 24-byte XChaCha nonces, 16-byte AEAD tags,
+and 32-byte `crypto_auth` tags. Never reuse a nonce with the same key. AEAD
+output needs message length plus 16 bytes. Discard output when decryption fails.
+`crypto_kx` alone does not authenticate peers: the calling protocol must verify
+peer identity or authenticate its complete handshake with a securely provisioned
+key. Do not use a human password directly as a PSK.
+
+Build pinned libsodium 1.0.22 locally (no system installation):
+
+```sh
+scripts/build-sodium.sh macos
+scripts/build-sodium.sh iphoneos
+scripts/build-sodium.sh iphonesimulator
+scripts/check-sodium.sh
+```
+
+All targets are arm64. Headers and static archives are under
+`build/sodium/<platform>/include` and `build/sodium/<platform>/lib/libsodium.a`.
+Pass the include directory to Clang and link that archive for the matching SDK.
+The source archive is fetched from the official release host over HTTPS and
+pinned with SHA-256; subsequent builds reject checksum differences. The script
+runs the upstream test suite for macOS; cross-compiled iOS archives cannot run
+those host tests. The Zen binding test checks an upstream AEAD known-answer
+vector, all ciphertext/tag byte mutations, changed associated data, directional
+key agreement, invalid peer rejection, and explicit buffer erasure with UBSan.
+This is primitive/binding validation, not a security audit of an app protocol.
+
+Native Zen crypto/SIMD is future work. It must preserve this interface and pass
+known vectors, differential tests, malformed-input tests and architecture-specific
+constant-time review before replacing libsodium. Source appearance alone is not
+proof of constant-time behavior.
+
+References: [XChaCha20-Poly1305](https://doc.libsodium.org/secret-key_cryptography/aead/chacha20-poly1305/xchacha20-poly1305_construction),
+[key exchange](https://doc.libsodium.org/key_exchange),
+[helpers](https://doc.libsodium.org/helpers).
 
 ## Current API
 
