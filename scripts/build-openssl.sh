@@ -11,7 +11,7 @@ if [ ! -d "$destination/openssl-src/.git" ]; then
 fi
 test "$(git -C "$destination/openssl-src" rev-parse HEAD)" = "$commit"
 cd "$destination/openssl-src"
-./Configure no-shared no-tests --prefix="$destination/openssl" > "$destination/openssl-config.log"
+./Configure no-shared no-tests --libdir=lib --prefix="$destination/openssl" > "$destination/openssl-config.log"
 make -j"${JOBS:-8}" > "$destination/openssl-build.log" 2>&1
 make install_sw > "$destination/openssl-install.log" 2>&1
 mkdir -p "$destination/openssl/ssl"
