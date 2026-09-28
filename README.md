@@ -3,7 +3,30 @@
 Zen cryptography interfaces with a vetted libsodium backend, alongside an
 experimental pure Zen byte-comparison candidate. Production encryption uses
 libsodium; the candidate is not used for security decisions. No handwritten C
-wrappers or compiler changes are needed.
+wrappers or compiler changes are needed for the libsodium API.
+
+## TLS package boundary
+
+`src/tls.zen` now contains the TLS client/transport implementation extracted from
+the current Zen standard library. It exports `TlsConnection`, `TlsFault`,
+`Transport`, and the transport operations used by the sibling `zen-http` package.
+The client verifies certificate chains and hostnames. Private OpenSSL builds
+need a configured CA bundle (`SSL_CERT_FILE`/`SSL_CERT_DIR`); they do not load the
+macOS Keychain automatically. Existing `std.net.tls` callers are not migrated.
+
+`src/zen_tls.h` supplies the shared OpenSSL headers/client-context constructor
+and the small native adapter used by the experimental HTTP server:
+session construction/cleanup and const-qualified ABI details. TLS policy,
+context lifetime, ALPN selection and nonblocking retry decisions live in Zen. It never creates or closes an OS socket. Callers own sockets
+and keep retry buffers stable across WANT_READ/WANT_WRITE. This adapter contains
+no handwritten cipher, hash, key exchange, or other cryptographic primitive.
+Graceful TLS shutdown, configurable TLS policies and client-context reuse are
+follow-up work; this is not a production-completeness claim.
+
+`sh scripts/build-openssl.sh` builds pinned OpenSSL 3.5.4 locally. An optional
+absolute destination lets a consuming package keep its dependency cache under
+its own ignored build directory. The HTTP/TLS integration tests live in
+`../zen-http/tests/check.py`; the libsodium checks below remain independent.
 
 ## Native backend
 
@@ -118,3 +141,15 @@ References: [NIST FIPS 180-4](https://csrc.nist.gov/pubs/fips/180-4/upd1/final)
 defines the planned SHA-256 algorithm;
 [libsodium helpers](https://doc.libsodium.org/helpers) explains fixed-length
 comparison expectations. No certification or equivalent assurance is implied.
+
+`ServerContext` in `src/tls.zen` owns the TLS 1.3 server configuration and
+OpenSSL context lifetime in Zen. Socket adapters borrow its handle and must
+close sessions before its owner is dropped. Cryptographic operations continue
+to use OpenSSL; nonblocking TLS retry decisions now live in `server_io` in Zen. Remaining C
+TLS helpers handle session creation/cleanup and const-qualified ABI details.
+
+
+`ServerContext.enable_h2()` installs native Zen ALPN selection for the experimental
+HTTP/2 listener. OpenSSL still performs the handshake and cryptography. The
+listener checks h2 was negotiated before sending protocol responses; omitting
+ALPN is rejected at that application boundary, not during the TLS handshake.
