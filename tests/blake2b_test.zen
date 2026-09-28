@@ -1,0 +1,111 @@
+// Independent differential oracle: libsodium. Fixed answers below were produced
+// with Python hashlib.blake2b; message[i] = i % 256 and key[i] = i.
+blake2b_candidate = blake2b
+Sodium, equal, decode_secret_hex = sodium
+
+check_vector = (out: Ptr<u8>, expected: Ptr<u8>, message: Ptr<u8>, count: usize, key: Ptr<u8>, key_count: usize, scratch: Ptr<u64>, hex: str) bool {
+    length = hex.len / 2;
+    decode_secret_hex(hex, expected, length) &&
+        blake2b_candidate(out, 64, length, message, count, key, key_count, scratch, 40) &&
+        equal(out, expected, length)
+}
+
+main = (env: Env) Res<i32, AllocError> {
+    a = env.mem.alloc();
+    memory = a.realloc<u8>(null_ptr<u8>(), 8704).try();
+    scratch = a.realloc<u64>(null_ptr<u64>(), 42).try();
+    message = memory; key = memory.offset(8256); out = memory.offset(8384); expected = memory.offset(8512);
+    Range(0, 8256).loop((i) { message.write(i, (i % 256).to_u8().match({Ok(v) => v, None => 0})); });
+    Range(0, 65).loop((i) { key.write(i, i.to_u8().match({Ok(v) => v, None => 0})); });
+    failures: usize ::= 0;
+    cases: usize ::= 0;
+    (Sodium.sodium_init() < 0).then(() { failures = failures + 1; });
+    Range(16, 65).loop((digest_count) {
+        Range(0, 65).loop((key_count) {
+            Range(0, 11).loop((case) {
+                count: usize = case.match({0 => 0, 1 => 1, 2 => 127, 3 => 128, 4 => 129, 5 => 255, 6 => 256, 7 => 257, 8 => 1024, 9 => 4096, _ => 8193});
+                Range(0, 66).loop((i) { out.write(i, 165); });
+                memory.write(8383, 165);
+                scratch.write(40, 1234567); scratch.write(41, 7654321);
+                oracle = Sodium.crypto_generichash(expected, digest_count, message, count.to_u64(), key, key_count) == 0;
+                native = blake2b_candidate(out, 64, digest_count, message, count, key, key_count, scratch, 40);
+                same = equal(out, expected, digest_count);
+                guard ::= memory.read(8383) == 165 && out.read(digest_count) == 165 && out.read(65) == 165;
+                guard = guard && scratch.read(40) == 1234567 && scratch.read(41) == 7654321;
+                (!(oracle && native && same && guard)).then(() {
+                    println("BLAKE2b mismatch output={} key={} input={}", digest_count, key_count, count);
+                    failures = failures + 1;
+                });
+                cases = cases + 1;
+            });
+        });
+    });
+    good ::= failures == 0;
+    good = check_vector(out, expected, message, 0, key, 0, scratch, "786a02f742015903c6c6fd852552d272912f4740e15847618a86e217f71f5419d25e1031afee585313896444934eb04b903a685b1448b755d56f701afe9be2ce") && good;
+    good = check_vector(out, expected, message, 0, key, 0, scratch, "0e5751c026e543b2e8ab2eb06099daa1d1e5df47778f7787faab45cdf12fe3a8") && good;
+    good = check_vector(out, expected, message, 0, key, 64, scratch, "10ebb67700b1868efb4417987acf4690ae9d972fb7a590c2f02871799aaa4786b5e996e8f0f4eb981fc214b005f42d2ff4233499391653df7aefcbc13fc51568") && good;
+    good = check_vector(out, expected, message, 1, key, 1, scratch, "e8f8b150b25feb56d0f4a9d72ff6f571") && good;
+    good = check_vector(out, expected, message, 128, key, 16, scratch, "dd8916a99bcfb015fa42b63b831a8f8e9d1875e6c595704e9c2e5fefb2df2c6c") && good;
+    good = check_vector(out, expected, message, 129, key, 64, scratch, "64475dfe7600d7171bea0b394e27c9b00d8e74dd1e416a79473682ad3dfdbb706631558055cfc8a40e07bd015a4540dcdea15883cbbf31412df1de1cd4152b91") && good;
+    good = check_vector(out, expected, message, 257, key, 32, scratch, "b3db2c3660246de14b8f19b133d868ff30026e65308416e8caa1645b1371ecdefe72a5f94954489b33efe4f5c3dc548d") && good;
+    good = check_vector(out, expected, message, 8193, key, 64, scratch, "ac82b4be610c8d9b51f6219e19d4705247a803c0b1fa85335b75fd5e28e4594f433b6825513b66808708e7c3069cf6590522a5e9894f0dc108e9829c1e660901") && good;
+    // A null input/key is valid only when its length is zero.
+    good = blake2b_candidate(out, 64, 32, null_ptr<u8>(), 0, null_ptr<u8>(), 0, scratch, 40) && good;
+    // Reject invalid arguments before writing any output bytes.
+    Range(0, 14).loop((case) {
+        Range(0, 66).loop((i) { out.write(i, 165); });
+        Range(0, 40).loop((i) { scratch.write(i, 987654321); });
+        accepted = case.match({
+            0 => blake2b_candidate(out, 64, 0, message, 1, key, 0, scratch, 40),
+            1 => blake2b_candidate(out, 64, 15, message, 1, key, 0, scratch, 40),
+            2 => blake2b_candidate(out, 66, 65, message, 1, key, 0, scratch, 40),
+            3 => blake2b_candidate(out, 31, 32, message, 1, key, 0, scratch, 40),
+            4 => blake2b_candidate(out, 0, 32, message, 1, key, 0, scratch, 40),
+            5 => blake2b_candidate(out, 64, 32, message, 1, key, 65, scratch, 40),
+            6 => blake2b_candidate(out, 64, 32, null_ptr<u8>(), 1, key, 0, scratch, 40),
+            7 => blake2b_candidate(out, 64, 32, message, 1, null_ptr<u8>(), 1, scratch, 40),
+            8 => blake2b_candidate(out, 64, 32, message, 1, key, 0, null_ptr<u64>(), 40),
+            9 => blake2b_candidate(out, 64, 32, message, 1, key, 0, scratch, 39),
+            10 => blake2b_candidate(out, 64, 32, message, 1, key, 0, scratch, 0),
+            11 => blake2b_candidate(null_ptr<u8>(), 64, 32, message, 1, key, 0, scratch, 40),
+            12 => blake2b_candidate(out, 64, 32, message, 1, null_ptr<u8>(), 64, scratch, 40),
+            _ => blake2b_candidate(out, 64, 32, null_ptr<u8>(), 128, key, 0, scratch, 40)
+        });
+        good = !accepted && good;
+        Range(0, 40).loop((i) { good = (scratch.read(i) == 987654321) && good; });
+        Range(0, 66).loop((i) { good = (out.read(i) == 165) && good; });
+    });
+    // Output may overlap input/key, including unaligned output and all three
+    // buffers aliased. Scratch remains separate, as required by the contract.
+    Range(0, 5).loop((case) {
+        Range(0, 8256).loop((i) { message.write(i, (i % 256).to_u8().match({Ok(v) => v, None => 0})); });
+        Range(0, 64).loop((i) { key.write(i, i.to_u8().match({Ok(v) => v, None => 0})); });
+        destination = case.match({0 => message, 1 => message.offset(1), 2 => message.offset(127), 3 => key, _ => message});
+        secret = (case == 4).match({true => message, false => key});
+        good = (Sodium.crypto_generichash(expected, 64, message, 257, secret, 64) == 0) && good;
+        good = blake2b_candidate(destination, 64, 64, message, 257, secret, 64, scratch, 40) && good;
+        good = equal(destination, expected, 64) && good;
+    });
+    // A deterministic content corpus complements the incremental-byte matrix.
+    // The LCG is test-data generation only, never a cryptographic RNG.
+    state: usize ::= 123456789;
+    Range(0, 128).loop((case) {
+        count = (case * 977) % 8193;
+        key_count = case % 65;
+        digest_count = 16 + case % 49;
+        Range(0, count).loop((i) {
+            state = (state * 1664525 + 1013904223) % 4294967296;
+            byte: u8 = (case % 3).match({0 => 0, 1 => 255, _ => (state / 16777216).to_u8().match({Ok(v) => v, None => 0})});
+            message.write(i, byte);
+        });
+        Range(0, key_count).loop((i) {
+            state = (state * 1664525 + 1013904223) % 4294967296;
+            key.write(i, (state / 16777216).to_u8().match({Ok(v) => v, None => 0}));
+        });
+        oracle = Sodium.crypto_generichash(expected, digest_count, message, count.to_u64(), key, key_count) == 0;
+        native = blake2b_candidate(out, 64, digest_count, message, count, key, key_count, scratch, 40);
+        good = (oracle && native && equal(out, expected, digest_count)) && good;
+    });
+    println("Native BLAKE2b: {} libsodium comparisons, 128 content cases, 8 hashlib vectors, 14 invalid arguments, 5 aliases: {}", cases, good);
+    Ok(good.match({true => 0, false => 1}))
+}

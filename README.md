@@ -1,7 +1,7 @@
 # zen-crypto
 
-Zen cryptography interfaces with a vetted libsodium backend, alongside an
-experimental pure Zen byte-comparison candidate. Production encryption uses
+Zen cryptography interfaces with a vetted libsodium backend, alongside
+experimental pure Zen BLAKE2b hashing and byte-comparison candidates. Production encryption uses
 libsodium; the candidate is not used for security decisions. No handwritten C
 wrappers or compiler changes are needed for the libsodium API.
 
@@ -65,7 +65,8 @@ vector, all ciphertext/tag byte mutations, changed associated data, directional
 key agreement, invalid peer rejection, and explicit buffer erasure with UBSan.
 This is primitive/binding validation, not a security audit of an app protocol.
 
-Native Zen crypto/SIMD is future work. It must preserve this interface and pass
+Native Zen BLAKE2b is now an opt-in implementation; SIMD and the remaining
+algorithms are future work. Replacements must preserve the relevant interfaces and pass
 known vectors, differential tests, malformed-input tests and architecture-specific
 constant-time review before replacing libsodium. Source appearance alone is not
 proof of constant-time behavior.
@@ -134,9 +135,10 @@ used for keys or nonces.
 
 ## Next
 
-See [the roadmap](docs/ROADMAP.md). SHA-256 is deferred because the current
-numeric floor lacks integer bitwise/shift operations. Arithmetic emulation would
-hide that gap and produce an unnecessarily slow implementation.
+See [the native implementation track](docs/NATIVE_CRYPTO.md) and
+[the roadmap](docs/ROADMAP.md). BLAKE2b requires the companion compiler/stdlib
+change providing native u64 XOR and rotate-right. SHA-256, AEAD and key exchange
+remain separate implementation work; no arithmetic emulation of XOR is used.
 
 References: [NIST FIPS 180-4](https://csrc.nist.gov/pubs/fips/180-4/upd1/final)
 defines the planned SHA-256 algorithm;
@@ -162,3 +164,44 @@ The native adapter handles socket syscalls/BIO ownership; OpenSSL performs TLS
 and cryptography, while Zen handles protocol policy and retries. The BIO does
 not support kTLS, fast-open or transfer of descriptor ownership. Its immutable
 method object is initialized once and retained for the process lifetime.
+
+
+## Native BLAKE2b candidate
+
+Import `blake2b_candidate = blake2b` from `src/blake2b.zen`. Hash compression,
+key handling, counters, padding and digest encoding are Zen source. This module
+does not call or link libsodium/OpenSSL; the differential test links libsodium
+as an oracle. Existing sodium-backed callers are not silently switched.
+
+```text
+blake2b_candidate(output, output_capacity, output_count,
+                  input, input_count, key, key_count,
+                  scratch, scratch_words) -> bool
+```
+
+The digest is 16–64 bytes; the key is 0–64 bytes (zero means unkeyed). Supply
+40 aligned `u64` scratch words, disjoint from all other buffers. Output may
+overlap input/key. Null input/key is accepted only at zero length. Invalid
+parameters return false without changing output or scratch. Valid memory spans
+and pointer lifetimes are the caller's responsibility. Key-derived scratch must
+be securely wiped by the caller; ordinary allocation/free does not erase it.
+
+This is a one-shot sequential candidate, without streaming, salt, personalization
+or tree mode. It is not an audited replacement for production keyed hashing.
+See [the implementation and validation contract](docs/NATIVE_CRYPTO.md).
+
+Compiler prerequisite: [Zen PR #6](https://github.com/lantos1618/zen/pull/6),
+commit `6c2aa6542d1acdd3e1bf233d844ad20200110fa8`. It is published but not yet
+merged into compiler `main`. Build that revision using the compiler's bootstrap
+instructions and point both compiler and standard-library paths at that checkout:
+
+```sh
+ZEN_COMPILER=/path/to/zen/zen ZEN_STD=/path/to/zen/src scripts/check-blake2b.sh
+ZEN_STD=/path/to/zen/src /path/to/zen/zen build test-blake2b
+build/test-blake2b
+```
+
+The differential command requires the existing pinned libsodium build (or
+`SODIUM_PREFIX`); the standalone build target needs no crypto dependency.
+The tested compiler prerequisite passes focused checks and bootstrap fixpoint;
+its full aggregate remains blocked by the documented warning-budget failure.

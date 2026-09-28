@@ -1,5 +1,14 @@
 # Crypto foundation roadmap
 
+## Current implementation checkpoint
+
+Native BLAKE2b is being added with compiler-backed u64 XOR and rotate-right.
+See [the current implementation track](NATIVE_CRYPTO.md) for its contract and
+validation evidence. The numeric audit below records the earlier baseline; the
+companion compiler change addresses only those two u64 operations, not the full
+u32/u64 bitwise, shift and rotate surface.
+
+
 ## 1. Standard-library/compiler numeric boundary
 
 First provide unsigned u32/u64 AND, OR, XOR, NOT, logical shifts and rotate.

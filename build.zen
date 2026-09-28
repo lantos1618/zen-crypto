@@ -8,5 +8,13 @@ build = (b :: Builder) Res<(), BuildError> {
         "test",
         {src: Path("tests/main.zen"), deps: [crypto], out: Ok(Path("build/test"))}
     ).try();
+    blake2b = b.lib(
+        "blake2b",
+        {src: Path("src/blake2b.zen"), libs: [], paths: []}
+    ).try();
+    b.exe(
+        "test-blake2b",
+        {src: Path("tests/blake2b_native_test.zen"), deps: [blake2b], out: Ok(Path("build/test-blake2b"))}
+    ).try();
     Ok(())
 }

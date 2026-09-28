@@ -1,0 +1,35 @@
+// This executable imports no sodium module and links no external crypto library.
+blake2b_candidate = blake2b
+hex_nibble = (byte: u8) u8 { (byte <= 57).match({true => byte - 48, false => byte - 87}) }
+check_vector = (out: Ptr<u8>, message: Ptr<u8>, count: usize, key: Ptr<u8>, key_count: usize, scratch: Ptr<u64>, hex: str) bool {
+    length = hex.len / 2;
+    good ::= blake2b_candidate(out, 64, length, message, count, key, key_count, scratch, 40);
+    Range(0, length).loop((i) {
+        byte = hex_nibble(hex.ptr().read(i * 2)) * 16 + hex_nibble(hex.ptr().read(i * 2 + 1));
+        good = (out.read(i) == byte) && good;
+    });
+    good
+}
+main = (env: Env) Res<i32, AllocError> {
+    a = env.mem.alloc();
+    message = a.realloc<u8>(null_ptr<u8>(), 8193).try();
+    key = a.realloc<u8>(null_ptr<u8>(), 64).try();
+    out = a.realloc<u8>(null_ptr<u8>(), 64).try();
+    scratch = a.realloc<u64>(null_ptr<u64>(), 40).try();
+    Range(0, 8193).loop((i) { message.write(i, (i % 256).to_u8().match({Ok(v) => v, None => 0})); });
+    Range(0, 64).loop((i) { key.write(i, i.to_u8().match({Ok(v) => v, None => 0})); });
+    good ::= true;
+    good = check_vector(out, message, 0, key, 0, scratch, "786a02f742015903c6c6fd852552d272912f4740e15847618a86e217f71f5419d25e1031afee585313896444934eb04b903a685b1448b755d56f701afe9be2ce") && good;
+    good = check_vector(out, message, 0, key, 0, scratch, "0e5751c026e543b2e8ab2eb06099daa1d1e5df47778f7787faab45cdf12fe3a8") && good;
+    good = check_vector(out, message, 0, key, 64, scratch, "10ebb67700b1868efb4417987acf4690ae9d972fb7a590c2f02871799aaa4786b5e996e8f0f4eb981fc214b005f42d2ff4233499391653df7aefcbc13fc51568") && good;
+    good = check_vector(out, message, 1, key, 1, scratch, "e8f8b150b25feb56d0f4a9d72ff6f571") && good;
+    good = check_vector(out, message, 128, key, 16, scratch, "dd8916a99bcfb015fa42b63b831a8f8e9d1875e6c595704e9c2e5fefb2df2c6c") && good;
+    good = check_vector(out, message, 129, key, 64, scratch, "64475dfe7600d7171bea0b394e27c9b00d8e74dd1e416a79473682ad3dfdbb706631558055cfc8a40e07bd015a4540dcdea15883cbbf31412df1de1cd4152b91") && good;
+    good = check_vector(out, message, 257, key, 32, scratch, "b3db2c3660246de14b8f19b133d868ff30026e65308416e8caa1645b1371ecdefe72a5f94954489b33efe4f5c3dc548d") && good;
+    good = check_vector(out, message, 8193, key, 64, scratch, "ac82b4be610c8d9b51f6219e19d4705247a803c0b1fa85335b75fd5e28e4594f433b6825513b66808708e7c3069cf6590522a5e9894f0dc108e9829c1e660901") && good;
+    // RFC 7693 Appendix A, BLAKE2b-512("abc").
+    message.write(0, 97); message.write(1, 98); message.write(2, 99);
+    good = check_vector(out, message, 3, key, 0, scratch, "ba80a53f981c4d0d6a2797b69f12f6e94c212f14685ac4b74b12bb6fdbffa2d17d87c5392aab792dc252d5de4533cc9518d38aa8dbf1925ab92386edd4009923") && good;
+    println("Standalone native BLAKE2b: 8 fixed hashlib vectors + RFC 7693 abc: {}", good);
+    Ok(good.match({true => 0, false => 1}))
+}

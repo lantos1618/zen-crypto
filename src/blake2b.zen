@@ -1,0 +1,215 @@
+// Experimental one-shot BLAKE2b, RFC 7693 sections 2 and 3.
+// https://www.rfc-editor.org/rfc/rfc7693.html
+// All hashing computation is Zen, using compiler-native integer operations.
+// No side-channel audit or secure-erasure guarantee. Retains keyed intermediate
+// state in caller scratch; erase it using the vetted sodium.wipe after use.
+Ptr = std.mem
+Range = std.core
+bit_xor, rotate_right, to_u64, to_usize, to_u8 = std.core.num
+
+// Caller supplies live input/key spans and output_capacity writable bytes.
+// Scratch is 40 aligned, writable u64 words and MUST NOT overlap any span.
+// Input, key, and output may overlap each other: output is written last.
+// Null input/key is allowed only for zero length. Invalid sizes/null pointers
+// return false before any write; pointers/capacities/alignment cannot be proven.
+// Digest length 16..64; key length 0..64. No salt, personalization or tree mode.
+blake2b_candidate* = (
+    output: Ptr<u8>, output_capacity: usize, output_count: usize,
+    input: Ptr<u8>, input_count: usize, key: Ptr<u8>, key_count: usize,
+    scratch: Ptr<u64>, scratch_words: usize
+) bool {
+    valid = output_count >= 16 && output_count <= 64 && output_capacity >= output_count
+        && key_count <= 64 && scratch_words >= 40 && !scratch.is_null()
+        && !output.is_null() && (input_count == 0 || !input.is_null())
+        && (key_count == 0 || !key.is_null());
+    valid.match({
+        false => false,
+        true => {
+            h = scratch;
+            m = scratch.offset(8);
+            v = scratch.offset(24);
+            Range(0, 8).loop((i) { h.write(i, iv(i)); });
+            parameter: u64 = 16842752 + key_count.to_u64() * 256 + output_count.to_u64();
+            h.write(0, h.read(0).bit_xor(parameter));
+            (key_count > 0).then(() {
+                load_block(m, key, key_count);
+                compress(h, m, v, 128, 0, input_count == 0);
+            });
+            offset: usize ::= 0;
+            (input_count - offset > 128).loop((loop) {
+                load_block(m, input.offset(offset), 128);
+                offset = offset + 128;
+                counter = offset.to_u64() +% (key_count > 0).match({true => 128, false => 0});
+                high: u64 = (counter < offset.to_u64()).match({true => 1, false => 0});
+                compress(h, m, v, counter, high, false);
+            });
+            (input_count > 0 || key_count == 0).then(() {
+                // Avoid even a zero offset on a null pointer for empty input.
+                tail = (input_count > 0).match({true => input.offset(offset), false => input});
+                load_block(m, tail, input_count - offset);
+                counter = input_count.to_u64() +% (key_count > 0).match({true => 128, false => 0});
+                high: u64 = (counter < input_count.to_u64()).match({true => 1, false => 0});
+                compress(h, m, v, counter, high, true);
+            });
+            Range(0, output_count).loop((i) {
+                word: u64 ::= h.read(i / 8);
+                Range(0, i % 8).loop((j) { word = word / 256; });
+                byte = (word % 256).to_usize().match({
+                    Ok(n) => n.to_u8().match({Ok(b) => b, None => 0}),
+                    None => 0,
+                });
+                output.write(i, byte);
+            });
+            true
+        },
+    })
+}
+
+load_block = (words: Ptr<u64>, input: Ptr<u8>, count: usize) () {
+    Range(0, 16).loop((i) { words.write(i, 0); });
+    factor: u64 ::= 1;
+    Range(0, count).loop((i) {
+        (i % 8 == 0).then(() { factor = 1; });
+        words.write(i / 8, words.read(i / 8) + input.read(i).to_u64() * factor);
+        factor = factor *% 256;
+    });
+}
+
+mix = (v: Ptr<u64>, a: usize, b: usize, c: usize, d: usize, x: u64, y: u64) () {
+    v.write(a, v.read(a) +% v.read(b) +% x);
+    v.write(d, v.read(d).bit_xor(v.read(a)).rotate_right(32));
+    v.write(c, v.read(c) +% v.read(d));
+    v.write(b, v.read(b).bit_xor(v.read(c)).rotate_right(24));
+    v.write(a, v.read(a) +% v.read(b) +% y);
+    v.write(d, v.read(d).bit_xor(v.read(a)).rotate_right(16));
+    v.write(c, v.read(c) +% v.read(d));
+    v.write(b, v.read(b).bit_xor(v.read(c)).rotate_right(63));
+}
+
+compress = (h: Ptr<u64>, m: Ptr<u64>, v: Ptr<u64>, low: u64, high: u64, last: bool) () {
+    Range(0, 8).loop((i) { v.write(i, h.read(i)); v.write(i + 8, iv(i)); });
+    v.write(12, v.read(12).bit_xor(low));
+    v.write(13, v.read(13).bit_xor(high));
+    last.then(() { v.write(14, v.read(14).bit_xor(18446744073709551615)); });
+    Range(0, 12).loop((round) { round_mix(v, m, round % 10); });
+    Range(0, 8).loop((i) { h.write(i, h.read(i).bit_xor(v.read(i)).bit_xor(v.read(i + 8))); });
+}
+
+iv = (i: usize) u64 {
+    i.match({
+        0 => 7640891576956012808,
+        1 => 13503953896175478587,
+        2 => 4354685564936845355,
+        3 => 11912009170470909681,
+        4 => 5840696475078001361,
+        5 => 11170449401992604703,
+        6 => 2270897969802886507,
+        _ => 6620516959819538809,
+    })
+}
+
+// The fixed public message schedule; no data-dependent lookup indices.
+round_mix = (v: Ptr<u64>, m: Ptr<u64>, round: usize) () {
+    round.match({
+        0 => {
+            mix(v, 0, 4, 8, 12, m.read(0), m.read(1));
+            mix(v, 1, 5, 9, 13, m.read(2), m.read(3));
+            mix(v, 2, 6, 10, 14, m.read(4), m.read(5));
+            mix(v, 3, 7, 11, 15, m.read(6), m.read(7));
+            mix(v, 0, 5, 10, 15, m.read(8), m.read(9));
+            mix(v, 1, 6, 11, 12, m.read(10), m.read(11));
+            mix(v, 2, 7, 8, 13, m.read(12), m.read(13));
+            mix(v, 3, 4, 9, 14, m.read(14), m.read(15));
+        },
+        1 => {
+            mix(v, 0, 4, 8, 12, m.read(14), m.read(10));
+            mix(v, 1, 5, 9, 13, m.read(4), m.read(8));
+            mix(v, 2, 6, 10, 14, m.read(9), m.read(15));
+            mix(v, 3, 7, 11, 15, m.read(13), m.read(6));
+            mix(v, 0, 5, 10, 15, m.read(1), m.read(12));
+            mix(v, 1, 6, 11, 12, m.read(0), m.read(2));
+            mix(v, 2, 7, 8, 13, m.read(11), m.read(7));
+            mix(v, 3, 4, 9, 14, m.read(5), m.read(3));
+        },
+        2 => {
+            mix(v, 0, 4, 8, 12, m.read(11), m.read(8));
+            mix(v, 1, 5, 9, 13, m.read(12), m.read(0));
+            mix(v, 2, 6, 10, 14, m.read(5), m.read(2));
+            mix(v, 3, 7, 11, 15, m.read(15), m.read(13));
+            mix(v, 0, 5, 10, 15, m.read(10), m.read(14));
+            mix(v, 1, 6, 11, 12, m.read(3), m.read(6));
+            mix(v, 2, 7, 8, 13, m.read(7), m.read(1));
+            mix(v, 3, 4, 9, 14, m.read(9), m.read(4));
+        },
+        3 => {
+            mix(v, 0, 4, 8, 12, m.read(7), m.read(9));
+            mix(v, 1, 5, 9, 13, m.read(3), m.read(1));
+            mix(v, 2, 6, 10, 14, m.read(13), m.read(12));
+            mix(v, 3, 7, 11, 15, m.read(11), m.read(14));
+            mix(v, 0, 5, 10, 15, m.read(2), m.read(6));
+            mix(v, 1, 6, 11, 12, m.read(5), m.read(10));
+            mix(v, 2, 7, 8, 13, m.read(4), m.read(0));
+            mix(v, 3, 4, 9, 14, m.read(15), m.read(8));
+        },
+        4 => {
+            mix(v, 0, 4, 8, 12, m.read(9), m.read(0));
+            mix(v, 1, 5, 9, 13, m.read(5), m.read(7));
+            mix(v, 2, 6, 10, 14, m.read(2), m.read(4));
+            mix(v, 3, 7, 11, 15, m.read(10), m.read(15));
+            mix(v, 0, 5, 10, 15, m.read(14), m.read(1));
+            mix(v, 1, 6, 11, 12, m.read(11), m.read(12));
+            mix(v, 2, 7, 8, 13, m.read(6), m.read(8));
+            mix(v, 3, 4, 9, 14, m.read(3), m.read(13));
+        },
+        5 => {
+            mix(v, 0, 4, 8, 12, m.read(2), m.read(12));
+            mix(v, 1, 5, 9, 13, m.read(6), m.read(10));
+            mix(v, 2, 6, 10, 14, m.read(0), m.read(11));
+            mix(v, 3, 7, 11, 15, m.read(8), m.read(3));
+            mix(v, 0, 5, 10, 15, m.read(4), m.read(13));
+            mix(v, 1, 6, 11, 12, m.read(7), m.read(5));
+            mix(v, 2, 7, 8, 13, m.read(15), m.read(14));
+            mix(v, 3, 4, 9, 14, m.read(1), m.read(9));
+        },
+        6 => {
+            mix(v, 0, 4, 8, 12, m.read(12), m.read(5));
+            mix(v, 1, 5, 9, 13, m.read(1), m.read(15));
+            mix(v, 2, 6, 10, 14, m.read(14), m.read(13));
+            mix(v, 3, 7, 11, 15, m.read(4), m.read(10));
+            mix(v, 0, 5, 10, 15, m.read(0), m.read(7));
+            mix(v, 1, 6, 11, 12, m.read(6), m.read(3));
+            mix(v, 2, 7, 8, 13, m.read(9), m.read(2));
+            mix(v, 3, 4, 9, 14, m.read(8), m.read(11));
+        },
+        7 => {
+            mix(v, 0, 4, 8, 12, m.read(13), m.read(11));
+            mix(v, 1, 5, 9, 13, m.read(7), m.read(14));
+            mix(v, 2, 6, 10, 14, m.read(12), m.read(1));
+            mix(v, 3, 7, 11, 15, m.read(3), m.read(9));
+            mix(v, 0, 5, 10, 15, m.read(5), m.read(0));
+            mix(v, 1, 6, 11, 12, m.read(15), m.read(4));
+            mix(v, 2, 7, 8, 13, m.read(8), m.read(6));
+            mix(v, 3, 4, 9, 14, m.read(2), m.read(10));
+        },
+        8 => {
+            mix(v, 0, 4, 8, 12, m.read(6), m.read(15));
+            mix(v, 1, 5, 9, 13, m.read(14), m.read(9));
+            mix(v, 2, 6, 10, 14, m.read(11), m.read(3));
+            mix(v, 3, 7, 11, 15, m.read(0), m.read(8));
+            mix(v, 0, 5, 10, 15, m.read(12), m.read(2));
+            mix(v, 1, 6, 11, 12, m.read(13), m.read(7));
+            mix(v, 2, 7, 8, 13, m.read(1), m.read(4));
+            mix(v, 3, 4, 9, 14, m.read(10), m.read(5));
+        },
+        _ => {
+            mix(v, 0, 4, 8, 12, m.read(10), m.read(2));
+            mix(v, 1, 5, 9, 13, m.read(8), m.read(4));
+            mix(v, 2, 6, 10, 14, m.read(7), m.read(6));
+            mix(v, 3, 7, 11, 15, m.read(1), m.read(5));
+            mix(v, 0, 5, 10, 15, m.read(15), m.read(11));
+            mix(v, 1, 6, 11, 12, m.read(9), m.read(14));
+            mix(v, 2, 7, 8, 13, m.read(3), m.read(12));
+            mix(v, 3, 4, 9, 14, m.read(13), m.read(0));
+        },
+    });
+}
