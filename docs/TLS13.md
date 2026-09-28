@@ -95,3 +95,10 @@ writes, and exchanged application data. Correctly encrypted but forged Finished,
 truncated Finished and ciphertext tampering were rejected without modifying the
 response buffer or sending application data before server authentication.
 The native executable's undefined symbols contained no external crypto calls.
+
+The client explicitly requests 8-byte alignment for both internal workspaces
+through `Alloc.raw`. The interoperability runner supplies an adversarial allocator
+that verifies those requests. A staged change requesting byte alignment triggers
+UBSan on a misaligned SHA word access before any handshake is sent. This guards
+the allocation contract instead of relying on the default arena's stronger
+alignment or generic `realloc` type information surviving trait dispatch.

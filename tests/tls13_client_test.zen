@@ -1,5 +1,27 @@
 Socket, SocketFault = std.net.socket
 tls13_psk_round_trip, Tls13ClientError = tls13_client
+// Test-only allocator: alignment-one requests deliberately return odd pointers.
+AlignmentAlloc = { base: Alloc, byte_requests: Ptr<usize>, word_requests: Ptr<usize>, odd: Ptr<Ptr<u8>> }
+AlignmentAlloc.impl(Alloc, {
+    raw = (self: @Self, count: usize, align: usize) Res<Ptr<u8>, AllocError> {
+        (align >= 8).match({
+            true  => { self.word_requests.write(0, self.word_requests.read(0) + 1); self.base.raw(count, align) },
+            false => {
+                self.byte_requests.write(0, self.byte_requests.read(0) + 1);
+                allocated = self.base.raw(count + 1, 8).try(); self.odd.write(0, allocated.offset(1)); Ok(allocated.offset(1))
+            },
+        })
+    }
+    realloc = <T>(self: @Self, pointer: Ptr<T>, count: usize) Res<Ptr<T>, AllocError> {
+        pointer.is_null().ensure(AllocError.OutOfMemory).try();
+        self.byte_requests.write(0, self.byte_requests.read(0) + 1);
+        allocated = self.base.raw(pointer.bytes(count) + 1, 8).try();
+        self.odd.write(0, allocated.offset(1)); Ok(allocated.offset(1).to<T>())
+    }
+    free = <T>(self: @Self, pointer: Ptr<T>) () {
+        pointer.to<u8>().same(self.odd.read(0)).match({true => self.base.free(pointer.to<u8>().back(1)), false => self.base.free(pointer)});
+    }
+})
 main = (env: Env) Res<i32, AllocError | SocketFault> {
     a     = env.mem.alloc();
     bytes = a.realloc<u8>(null_ptr<u8>(), 17000).try();
@@ -8,9 +30,18 @@ main = (env: Env) Res<i32, AllocError | SocketFault> {
     Range(0, 16384).loop((i) { output.write(i, 165); });
     // RANDOM
     socket ::= Socket.tcp_connect(a, "127.0.0.1", TEST_PORT).try();
-    request: str = "native zen\n";
-    good         = tls13_psk_round_trip(
-        a,
+    request: str  = "native zen\n";
+    byte_requests = a.realloc<usize>(null_ptr<usize>(), 1).try(); byte_requests.write(0, 0);
+    word_requests = a.realloc<usize>(null_ptr<usize>(), 1).try(); word_requests.write(0, 0);
+    odd = a.realloc<Ptr<u8>>(null_ptr<Ptr<u8>>(), 1).try(); odd.write(0, null_ptr<u8>());
+    aligned = AlignmentAlloc(
+        base: a,
+        byte_requests: byte_requests,
+        word_requests: word_requests,
+        odd: odd
+    );
+    good ::= tls13_psk_round_trip(
+        aligned,
         socket.handle(),
         "ZenTest",
         psk,
@@ -29,5 +60,8 @@ main = (env: Env) Res<i32, AllocError | SocketFault> {
         },
         Err(_)    => { unchanged ::= true; Range(0, 16384).loop((i) { unchanged = unchanged && output.read(i) == 165; }); println("handshake rejected; output unchanged: {}", unchanged); false },
     });
+    alignment_ok = byte_requests.read(0) == 0 && word_requests.read(0) == 2;
+    println("explicit TLS allocation alignment: {}", alignment_ok);
+    good = good && alignment_ok;
     socket.close(); Ok(good.match({true => 0, false => 1}))
 }

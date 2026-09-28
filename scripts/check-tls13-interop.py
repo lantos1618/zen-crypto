@@ -22,16 +22,20 @@ def build(port):
         fields=line.split()
         if fields:assert not re.match(r'(sodium_|crypto_|SSL_|OPENSSL_|EVP_|randombytes)',fields[-1].lstrip('_'))
     return WORK/'client'
-def run_client(binary,success):
+def run_client(binary,success,alignment_control=False):
     r=subprocess.run([str(binary)],capture_output=True,text=True,timeout=20)
+    if alignment_control:
+        assert r.returncode != 0 and 'misaligned address' in r.stderr,(r.returncode,r.stdout,r.stderr)
+        return 'alignment mutation rejected by UBSan before handshake'
     assert r.returncode==(0 if success else 1),(r.returncode,r.stdout,r.stderr)
+    assert 'explicit TLS allocation alignment: true' in r.stdout,r.stdout
     assert ('application authenticated: true' if success else 'output unchanged: true') in r.stdout,r.stdout
     return r.stdout
 
 def listener():
     s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);s.bind(('127.0.0.1',0));s.listen(1);s.settimeout(20);return s
 
-def openssl_case(wrong=False):
+def openssl_case(wrong=False,alignment_control=False):
     s=listener();port=s.getsockname()[1];s.close();binary=build(port)
     with (WORK/('openssl-wrong.log' if wrong else 'openssl.log')).open('w') as log:
         proc=subprocess.Popen([str(OPENSSL),'s_server','-accept',f'127.0.0.1:{port}','-nocert','-psk',('ff'*32 if wrong else PSK.hex()),'-psk_identity','ZenTest','-ciphersuites','TLS_CHACHA20_POLY1305_SHA256','-tls1_3','-allow_no_dhe_kex','-num_tickets','0','-rev','-quiet'],stdin=subprocess.DEVNULL,stdout=log,stderr=log)
@@ -42,12 +46,12 @@ def openssl_case(wrong=False):
                     with socket.create_connection(('127.0.0.1',port),timeout=.1):break
                 except OSError:time.sleep(.02)
             else:raise RuntimeError('OpenSSL did not listen')
-            print(run_client(binary,not wrong).strip())
+            print(run_client(binary,not wrong,alignment_control).strip())
         finally:
             proc.terminate()
             try:proc.wait(timeout=3)
             except subprocess.TimeoutExpired:proc.kill();proc.wait()
-    print('PASS OpenSSL '+('wrong PSK rejected' if wrong else 'PSK authenticated exchange'))
+    print('PASS OpenSSL '+('alignment regression control' if alignment_control else ('wrong PSK rejected' if wrong else 'PSK authenticated exchange')))
 
 def extract(salt,ikm):return hmac.digest(salt,ikm,'sha256')
 def label(secret,name,context,count=32):
@@ -128,3 +132,14 @@ openssl_case()
 openssl_case(True)
 for mode in ['valid','bad-finished','truncated-finished','tamper','hrr','oversized-plaintext']:reference_case(mode)
 print('PASS native-only client symbols, interoperability and malicious peer rejection')
+
+# Reintroduce the old byte-aligned workspace only in a staged source copy.
+# The odd-byte allocator must expose an actual misaligned SHA word access.
+original=(STAGE/'tls13_client.zen').read_text()
+old='a.raw(180000, 8)'
+assert original.count(old)==1
+(STAGE/'tls13_client.zen').write_text(original.replace(old,'a.raw(180000, 1)',1))
+try:
+    openssl_case(alignment_control=True)
+finally:
+    (STAGE/'tls13_client.zen').write_text(original)

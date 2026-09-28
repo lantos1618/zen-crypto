@@ -108,9 +108,12 @@ tls13_psk_round_trip* = (a: Alloc, socket: SocketFd, identity: str, psk: Ptr<u8>
     (!psk.is_null() && psk_count > 0 && !random.is_null() && identity.len > 0 && identity.len <= 255 && request_count <= 16384 && (request_count == 0 || !request.is_null()) && !response.is_null()).ensure(
         Tls13ClientError.Invalid
     ).try();
-    memory = a.realloc<u8>(null_ptr<u8>(), 180000).try(); @scope.defer(() { a.free(memory); });
-    scratch = a.realloc<u64>(null_ptr<u64>(), 4096).try(); @scope.defer(() { a.free(scratch); });
-    record = memory; plain = memory.offset(17000); pending = memory.offset(34000); transcript = memory.offset(100000);
+    // Alloc's generic method currently erases its element type at trait calls.
+    // Request alignment explicitly before constructing native word views.
+    memory = a.raw(180000, 8).try(); @scope.defer(() { a.free(memory); });
+    scratch_bytes = a.raw(32768, 8).try(); @scope.defer(() { a.free(scratch_bytes); });
+    scratch = scratch_bytes.to<u64>();
+    record  = memory; plain = memory.offset(17000); pending = memory.offset(34000); transcript = memory.offset(100000);
     schedule = memory.offset(166000); app = memory.offset(166200); keys = memory.offset(166400); digest = memory.offset(166600); verify = memory.offset(166700); hash_work = memory.offset(167000); hash_words = memory.offset(167104).to<u32>();
     ch_count = 107 + identity.len;
     writer ::= ByteWriter.open(

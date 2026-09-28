@@ -1,2 +1,3 @@
-# Reference AEAD for tests/check_tls13.py only; not a Zen runtime dependency.
-cryptography>=42
+# Reference AEAD for tests/check_tls13.py and TLS peer tests only.
+# Validated with 41.0.7 on Linux and 50.0.1 on macOS; not a runtime dependency.
+cryptography>=41.0.7
