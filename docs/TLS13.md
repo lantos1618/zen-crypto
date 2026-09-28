@@ -102,3 +102,12 @@ that verifies those requests. A staged change requesting byte alignment triggers
 UBSan on a misaligned SHA word access before any handshake is sent. This guards
 the allocation contract instead of relying on the default arena's stronger
 alignment or generic `realloc` type information surviving trait dispatch.
+
+The final implementation at `9aae3f1` also passes these TLS vector,
+interoperability and alignment checks on Linux x86_64 with Clang 18.1.3.
+The native primitive suite and 1,080-case optional libsodium comparison pass
+there as well. [Exact revisions, commands and results](../tests/validation/tls13-linux-2026-09-28.txt)
+record the run. The std prerequisites are in PR #8; focused Linux tests and its
+warning gate pass, but this evidence does not claim the full compiler aggregate
+passed. The full macOS corpus had 1,347 passes, 15 failures and one deferred case;
+matched baseline investigations reproduced the examined failures.

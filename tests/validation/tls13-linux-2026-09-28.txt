@@ -1,0 +1,86 @@
+Native Zen crypto and experimental TLS 1.3 Linux validation, 2026-09-28
+
+Published source revisions
+  zen compiler/std: 6494242457685b3bf0ada430edc812414fe0bc22
+    https://github.com/lantos1618/zen/tree/native-tls-bits
+  zen-crypto final TLS checks: 9aae3f1811e02d2ac3853abb74bb4592d5106951
+  zen-crypto primitive checks: 89768fb6cd65f095ce3b2b4741e8e464ec3718d2
+    https://github.com/lantos1618/zen-crypto
+  Primitive implementations were unchanged by the final alignment follow-up.
+  Sources were fetched from public Git repositories.
+
+Environment and compiler provenance
+  Linux 6.8.0-139-generic x86_64
+  Ubuntu Clang 18.1.3 (1ubuntu1), Python 3.12.3
+  Python cryptography 41.0.7 (independent test reference only)
+  OpenSSL 3.5.4 (independent TLS peer only)
+  libsodium 1.0.22 (optional AEAD differential reference only)
+  Workspace: /home/ubuntu/zen-native-crypto-validation-20260928
+  Compiler: zen/build/bootstrap/zen-seed, built from the published C seed with:
+    make build/bootstrap/zen-seed CC=clang CFLAGS='-O2 -std=c99'
+  Matching standard library: zen/src
+  SHA256 seed/zen.c:
+    b5477f414481cbbf6090dc707bb59e302487c3d40d948013505cb36d8c5cf5ab
+  SHA256 build/bootstrap/zen-seed:
+    962f1d95654887ece7f7ae8c19de622b49b9f921544518822fd0e18d78e4d928
+
+Commands (run from zen-crypto unless specified)
+  root=/home/ubuntu/zen-native-crypto-validation-20260928
+  export ZEN_COMPILER="$root/zen/build/bootstrap/zen-seed"
+  export ZEN_STD="$root/zen/src"
+  export SODIUM_PREFIX="$root/zen-crypto/build/sodium/linux"
+  export OPENSSL=/home/ubuntu/zen-http-validation-20260928-1952/zen-http/build/openssl/bin/openssl
+  sh scripts/check.sh
+  sh scripts/check-chacha20poly1305.sh
+  sh scripts/check-tls13.sh
+  From zen:
+    python3 tests/run.py --zen ./build/bootstrap/zen-seed --filter '*integer_bits*' --no-result-cache
+    python3 tests/run.py --zen ./build/bootstrap/zen-seed --filter '*bytes_cursor*' --no-result-cache
+    ZEN="$root/zen/build/bootstrap/zen-seed" bash tests/quality/generated_c_warnings.sh
+
+Results: all commands above exited 0.
+  Native primitives at 89768fb:
+    Byte equality: empty/alias, 1024 mismatch positions, lengths 0..65,
+      and all byte values passed.
+    Standalone BLAKE2b: eight hashlib vectors plus RFC 7693 abc passed;
+      IV mutation rejected; no external crypto symbols.
+    SHA256/HMAC/HKDF: 141/106/36 RFC and Python reference cases passed
+      under O3 and UBSan, plus million-byte SHA, incremental, alias and
+      invalid-argument cases. SHA IV mutation rejected.
+    ChaCha20-Poly1305: two RFC 8439 vectors, 186 tamper cases, bounds,
+      invalid arguments and in-place cases passed under O3 and UBSan.
+    Seven Poly1305 carry/reduction vectors passed.
+    AEAD libsodium differential: 1080 cases, zero failures, each under
+      O3 and UBSan.
+  Final TLS at 9aae3f1, compiled with Clang -O2 and UBSan:
+    Independent key schedule, RFC 8448 derivation and 12 ChaCha20 record
+      vectors passed, including padding and tamper checks.
+    Wrong TLS label negative control rejected; no external crypto symbols.
+    OpenSSL authenticated PSK exchange passed; wrong PSK rejected.
+    Independent fragmented peer passed; bad Finished, truncated Finished,
+      tampered record, HelloRetryRequest and oversized plaintext rejected.
+    Custom allocator asserted explicit alignment on the two workspaces.
+    Mutating workspace alignment to 1 triggered UBSan before handshake,
+      demonstrating that the alignment regression control detects the fault.
+  Compiler/std:
+    Integer-bit corpus: 7 passed. Byte-cursor corpus: 1 passed.
+    Emitted integer-bit and byte-cursor tests also matched expected output
+      with Clang -O2 and UBSan.
+    Generated-C warning gate passed: GCC seed 315 / emitted 1 warnings;
+      Clang seed 320 / emitted 7 warnings. Warnings were not suppressed
+      by increasing the gate budget.
+
+Logs retained under the remote workspace above:
+  tls-native.log
+  tls-aead-differential.log
+  tls-alignment-vectors-interop.log
+  tls-compiler-bits-tests.log
+  tls-compiler-bytes-tests.log
+  tls-compiler-warning-gate.log
+  tls-compiler-environment.txt
+Local ignored copies: build/linux-native-validation/tls13/
+
+Scope: functional interoperability and regression checks for experimental
+external-PSK TLS 1.3 with ChaCha20-Poly1305. This does not establish complete
+TLS support, X.509 support, a security audit, constant-time behavior or a
+performance advantage. The complete compiler corpus was not run on Linux.
