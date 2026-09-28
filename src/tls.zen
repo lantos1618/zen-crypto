@@ -50,7 +50,7 @@ Native = c.bind("zen_tls.h", {
     ) i32
     SSL_new = (ctx: Ptr<()>) Ptr<()>
     SSL_free = (ssl: Ptr<()>) ()
-    SSL_set_fd = (ssl: Ptr<()>, fd: i32) i32
+    zen_tls_set_fd = (ssl: Ptr<()>, fd: i32) i32
     SSL_ctrl = (ssl: Ptr<()>, command: i32, larg: i64, parg: Ptr<()>) i64
     SSL_set_hostflags = (ssl: Ptr<()>, flags: u32) ()
     SSL_set1_host = (ssl: Ptr<()>, host: Ptr<c_char>) i32
@@ -148,7 +148,7 @@ wrap_ssl = (
         },
         false => {
             Native.SSL_set_hostflags(ssl, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
-            configured = Native.SSL_set_fd(
+            configured = Native.zen_tls_set_fd(
                 ssl,
                 socket.handle().raw_handle()
             ) == 1

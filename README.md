@@ -153,3 +153,11 @@ TLS helpers handle session creation/cleanup and const-qualified ABI details.
 HTTP/2 listener. OpenSSL still performs the handshake and cryptography. The
 listener checks h2 was negotiated before sending protocol responses; omitting
 ALPN is rejected at that application boundary, not during the TLS handshake.
+
+
+On Linux, TLS uses a borrowed-socket BIO that sends with MSG_NOSIGNAL. This
+prevents socket-write SIGPIPE without changing process-wide signal disposition.
+The native adapter handles socket syscalls/BIO ownership; OpenSSL performs TLS
+and cryptography, while Zen handles protocol policy and retries. The BIO does
+not support kTLS, fast-open or transfer of descriptor ownership. Its immutable
+method object is initialized once and retained for the process lifetime.
