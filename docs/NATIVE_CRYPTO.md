@@ -83,3 +83,13 @@ compiler `6c2aa654` and crypto `54a1605`. The hash-verified libsodium1.0.22
 reference build also passes its own101 tests. Compiler warnings remain.
 [Linux revisions, binary hashes and test summary](../tests/validation/blake2b-linux-2026-09-28.txt)
 record this run. No timing or speed claim is added.
+
+## Backend extraction validation
+
+Native-only zen-crypto `55d140e` passes its default comparison/BLAKE2b checks on
+macOS arm64 and Linux x86_64. The optional differential suite also passes with
+its oracle imported only from zen-sodium `8fccbfd`. Linux used compiler
+`6c2aa654` and an existing pinned libsodium archive through `SODIUM_PREFIX`.
+The separate sodium binding suite passed under UBSan. No external cryptographic
+library is linked by the native standalone target. Extraction did not change
+the algorithms or add native TLS.
