@@ -77,3 +77,9 @@ the same revision containing the numeric prerequisite. The differential runner
 is `scripts/check-blake2b.sh`; it accepts `ZEN_COMPILER`, `ZEN_STD`, `CC` and
 `SODIUM_PREFIX` overrides. Its IV mutation is applied only to an ignored generated
 C copy, never to the maintained algorithm source.
+
+The same complete suite passes on Linux x86_64 with Clang18.1.3 using published
+compiler `6c2aa654` and crypto `54a1605`. The hash-verified libsodium1.0.22
+reference build also passes its own101 tests. Compiler warnings remain.
+[Linux revisions, binary hashes and test summary](../tests/validation/blake2b-linux-2026-09-28.txt)
+record this run. No timing or speed claim is added.
