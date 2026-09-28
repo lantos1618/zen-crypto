@@ -2,8 +2,8 @@
 
 The first implemented algorithm is BLAKE2b, the primitive behind the
 libsodium generic-hash binding. Its compression, key-block handling, counters,
-finalization and digest encoding belong in Zen. libsodium is a test oracle and
-continues to serve existing callers until replacement gates are met.
+finalization and digest encoding belong in Zen. libsodium is an optional test oracle supplied by the separate `zen-sodium`
+package. This repository has no external cryptographic runtime backend.
 
 The language needs real integer XOR and rotate-right operations. Those belong
 in the compiler and standard numeric module, with defined word-width behavior,
@@ -24,7 +24,7 @@ that does not make a source-level Zen algorithm a handwritten C implementation.
    not a substitute.
 
 This order implements the existing algorithms rather than designing new ones.
-The existing sodium bindings remain available throughout migration. A passing
+The existing sodium bindings remain available in the separate `zen-sodium` package. A passing
 vector suite demonstrates tested functional agreement, not side-channel safety.
 Default replacement also needs optimized-code review per architecture/toolchain,
 error/ownership cleanup, timing evidence and independent security review.
@@ -40,7 +40,7 @@ inferred from lengths alone.
 
 Invalid public parameters must return failure before changing output or scratch.
 Scratch contains key-derived state after success. Ordinary writes are not a
-secure-erasure guarantee: callers must use the existing vetted wipe operation
+secure-erasure guarantee: callers must use the vetted wipe operation from `zen-sodium`
 when disposing of keyed state. This is not a complete secret-owner abstraction.
 
 Initial scope is sequential one-shot BLAKE2b. It does not provide tree hashing,

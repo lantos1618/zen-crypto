@@ -2,7 +2,7 @@
 // https://www.rfc-editor.org/rfc/rfc7693.html
 // All hashing computation is Zen, using compiler-native integer operations.
 // No side-channel audit or secure-erasure guarantee. Retains keyed intermediate
-// state in caller scratch; erase it using the vetted sodium.wipe after use.
+// state in caller scratch; erase it using a vetted wipe (e.g. the separate zen-sodium package) after use.
 Ptr = std.mem
 Range = std.core
 bit_xor, rotate_right, to_u64, to_usize, to_u8 = std.core.num

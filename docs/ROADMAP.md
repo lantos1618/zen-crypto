@@ -56,7 +56,7 @@ than replacing its erasure/copy contracts.
 
 ## 2. Algorithms belong in zen-crypto
 
-The current encryption backend is libsodium; native replacements are opt-in
+Application encryption can use the separate `zen-sodium` backend package; native implementations here are opt-in
 research until the gates below pass. Prioritize XChaCha20-Poly1305 compatibility
 with that backend: a portable ChaCha20/HChaCha20 reference, Poly1305 arithmetic,
 then the combined AEAD construction. Implement the specified construction rather
@@ -99,7 +99,7 @@ caller-owned libsodium bindings: normal arenas and
 actor payload copying can duplicate secrets. Secure erasure needs compiler/OS
 semantics resistant to dead-store elimination; ordinary zero writes are not a
 secure wipe. Locked pages, dumps, swapping and actor transport require separate
-contracts. The current binding supplies sodium_memzero, not a comprehensive locked-page or
+contracts. The separate `zen-sodium` binding supplies sodium_memzero, not a comprehensive locked-page or
 non-copyable secret-buffer abstraction. Compile-time paired-build PSKs remain in
 application artifacts; runtime erasure cannot erase those original copies.
 
