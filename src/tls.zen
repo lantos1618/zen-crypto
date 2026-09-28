@@ -21,7 +21,8 @@ Native = c.bind("zen_tls.h", {
     SSL_TLSEXT_ERR_OK: i32
     SSL_TLSEXT_ERR_ALERT_FATAL: i32
     zen_tls_set_alpn_callback = (ctx: Ptr<()>, callback: Ptr<()>) ()
-    zen_tls_has_h2 = (session: Ptr<()>) i32
+    zen_tls_selected_data = (session: Ptr<()>) Ptr<u8>
+    zen_tls_selected_length = (session: Ptr<()>) u32
     TLS1_3_VERSION: i32
     SSL_FILETYPE_PEM: i32
     SSL_OP_NO_COMPRESSION: u64
@@ -39,7 +40,7 @@ Native = c.bind("zen_tls.h", {
     SSL_read = (ssl: Ptr<()>, bytes: Ptr<u8>, len: usize) i32
     SSL_write = (ssl: Ptr<()>, bytes: Ptr<u8>, len: usize) i32
     SSL_has_pending = (ssl: Ptr<()>) i32
-    zen_tls_client_context = () Ptr<()>
+    zen_tls_client_method = () Ptr<()>
     SSL_CTX_free = (ctx: Ptr<()>) ()
     SSL_CTX_set_default_verify_paths = (ctx: Ptr<()>) i32
     SSL_CTX_set_verify = (ctx: Ptr<()>, mode: i32, callback: Ptr<()>) ()
@@ -100,7 +101,7 @@ wrap_socket = (a: Alloc, socket :: Socket, host: str, h2: bool)
     io_counts ::= a.Vec<usize>();
     io_counts.add(0).try(TlsFault.TlsFailed);
     io_counts.add(0).try(TlsFault.TlsFailed);
-    ctx = Native.zen_tls_client_context();
+    ctx = Native.SSL_CTX_new(Native.zen_tls_client_method());
     ctx.is_null().match({
         true  => Err(TlsFault.TlsFailed),
         false => wrap_ctx(a, consume socket, host_c, h2, ctx, io_counts),
@@ -469,5 +470,15 @@ select_h2 = (
     })
 }
 server_h2_selected* = (session: Ptr<()>) bool {
-    !session.is_null() && Native.zen_tls_has_h2(session) == 1
+    // A session is single-threaded; the borrowed ALPN bytes stay owned by SSL.
+    (session.is_null()).match({
+        true => false,
+        false => (Native.zen_tls_selected_length(session) == 2).match({
+            false => false,
+            true => {
+                selected = Native.zen_tls_selected_data(session);
+                !selected.is_null() && selected.read(0) == 'h' && selected.read(1) == '2'
+            },
+        }),
+    })
 }

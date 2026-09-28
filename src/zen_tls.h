@@ -8,7 +8,7 @@
 #include <limits.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
-static void *zen_tls_client_context(void) { return SSL_CTX_new(TLS_client_method()); }
+static void *zen_tls_client_method(void) { return (void *)TLS_client_method(); }
 /* Const-qualified OpenSSL ABI cannot currently be expressed in Zen. */
 static void *zen_tls_server_method(void) { return (void *)TLS_server_method(); }
 static void zen_tls_selected(SSL *ssl, unsigned char **data, unsigned int *len) {
@@ -20,10 +20,16 @@ static void zen_tls_selected(SSL *ssl, unsigned char **data, unsigned int *len) 
 static void zen_tls_set_alpn_callback(SSL_CTX *ctx, void *callback) {
     SSL_CTX_set_alpn_select_cb(ctx, (SSL_CTX_alpn_select_cb_func)callback, NULL);
 }
-static int zen_tls_has_h2(SSL *ssl) {
+/* Borrowed ALPN accessors isolate OpenSSL's const/out-parameter ABI. */
+static unsigned char *zen_tls_selected_data(SSL *ssl) {
     const unsigned char *data = NULL; unsigned int len = 0;
     SSL_get0_alpn_selected(ssl, &data, &len);
-    return len == 2 && data[0] == 'h' && data[1] == '2';
+    return (unsigned char *)data;
+}
+static unsigned int zen_tls_selected_length(SSL *ssl) {
+    const unsigned char *data = NULL; unsigned int len = 0;
+    SSL_get0_alpn_selected(ssl, &data, &len);
+    return len;
 }
 #ifdef __linux__
 #include <errno.h>

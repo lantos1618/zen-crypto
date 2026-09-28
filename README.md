@@ -14,10 +14,11 @@ The client verifies certificate chains and hostnames. Private OpenSSL builds
 need a configured CA bundle (`SSL_CERT_FILE`/`SSL_CERT_DIR`); they do not load the
 macOS Keychain automatically. Existing `std.net.tls` callers are not migrated.
 
-`src/zen_tls.h` supplies the shared OpenSSL headers/client-context constructor
+`src/zen_tls.h` supplies the shared OpenSSL headers and borrowed ABI accessors
 and the small native adapter used by the experimental HTTP server:
 session construction/cleanup and const-qualified ABI details. TLS policy,
-context lifetime, ALPN selection and nonblocking retry decisions live in Zen. It never creates or closes an OS socket. Callers own sockets
+client-context construction, context lifetime, ALPN selection/validation and
+nonblocking retry decisions live in Zen. It never creates or closes an OS socket. Callers own sockets
 and keep retry buffers stable across WANT_READ/WANT_WRITE. This adapter contains
 no handwritten cipher, hash, key exchange, or other cryptographic primitive.
 Graceful TLS shutdown, configurable TLS policies and client-context reuse are
