@@ -17,12 +17,16 @@ that generated backend output is distinct from calling an external crypto librar
 - `chacha20poly1305_seal`, `chacha20poly1305_open = chacha20poly1305`:
   IETF ChaCha20-Poly1305 with a 12-byte nonce and 16-byte tag.
 - `tls13`: SHA-256 TLS 1.3 key schedule and ChaCha20-Poly1305 records.
-- `tls13_psk_round_trip = tls13_client`: bounded external-PSK TLS 1.3 client
-  exchange, tested against OpenSSL and an independent fragmented peer.
+- `x25519_public_key`, `x25519_shared_secret = x25519`: native RFC 7748
+  scalar multiplication with caller-owned scratch. See [X25519](docs/X25519.md).
+- `tls13_psk_connect`, `Tls13Session = tls13_client`: reusable external-PSK
+  TLS 1.3 client with authenticated records and shutdown.
+  `tls13_psk_round_trip` remains a convenience wrapper. See [TLS scope](docs/TLS13.md).
 
-These are experimental implementations. XChaCha20-Poly1305, X25519 and
-certificate-based native TLS are not implemented here yet. No independent security audit or production
-side-channel guarantee is claimed. See [the native implementation track](docs/NATIVE_CRYPTO.md).
+These are experimental implementations. XChaCha20-Poly1305 and
+certificate-based native TLS are not implemented here yet. The TLS handshake
+still uses `psk_ke`; standalone X25519 is not yet connected to its key exchange.
+No independent security audit or production side-channel guarantee is claimed. See [the native implementation track](docs/NATIVE_CRYPTO.md).
 
 ## Backend packages and migration
 
@@ -45,8 +49,8 @@ certificate-based native TLS or remove OpenSSL from HTTPS applications.
 
 Use matching compiler and standard library builds with u32/u64 XOR, AND,
 rotate-right and logical right shift, plus `std.bytes`. These additions are in
-[Zen PR #8](https://github.com/lantos1618/zen/pull/8), commit `64942424`; older main `b107afe5` only supports the
-BLAKE2b subset. From this repo:
+merged [Zen PR #8](https://github.com/lantos1618/zen/pull/8), main commit
+`08ea4cbd`; older main `b107afe5` only supports the BLAKE2b subset. From this repo:
 
 ```sh
 ZEN_COMPILER=/path/to/zen/zen ZEN_STD=/path/to/zen/src scripts/check.sh
@@ -55,7 +59,8 @@ build/test-blake2b
 ```
 
 The normal checks build comparison, BLAKE2b, SHA-256/HMAC/HKDF and
-ChaCha20-Poly1305 without external crypto headers or libraries. The BLAKE2b standalone check runs nine known answers,
+ChaCha20-Poly1305 and X25519 without external crypto headers or libraries.
+The BLAKE2b standalone check runs nine known answers,
 inspects unresolved symbols and rejects a deliberate IV-bitflip negative control.
 `CC` and `PYTHON` can override the BLAKE2b test toolchain. Defaults use a sibling
 `zen-actor-runtime` compiler checkout; build products are ignored under `build/`.
