@@ -23,11 +23,14 @@ that generated backend output is distinct from calling an external crypto librar
   reusable external-PSK TLS 1.3 client, with an explicit native X25519 exchange
   option, authenticated records and shutdown.
   `tls13_psk_round_trip` remains a convenience wrapper. See [TLS scope](docs/TLS13.md).
+- `tls13_psk_dhe_accept = tls13_server`: native TLS 1.3 server handshake
+  over a borrowed connected socket, authenticating the PSK binder and client
+  Finished before returning a reusable session.
 
 These are experimental implementations. XChaCha20-Poly1305 and
 certificate-based native TLS are not implemented here yet. The native client
-supports explicit `psk_ke` and X25519 `psk_dhe_ke` profiles; neither verifies
-web certificates. The DHE API requires independently generated public random
+supports explicit `psk_ke` and X25519 `psk_dhe_ke` profiles; the native server
+requires `psk_dhe_ke`. Neither role verifies web certificates. The DHE API requires independently generated public random
 and secret ephemeral key bytes.
 No independent security audit or production side-channel guarantee is claimed. See [the native implementation track](docs/NATIVE_CRYPTO.md).
 

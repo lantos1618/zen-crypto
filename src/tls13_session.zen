@@ -1,6 +1,6 @@
 // Experimental blocking TLS 1.3 PSK session. Socket ownership and I/O deadlines
 // remain with the caller. One owner must serialize all operations; do not copy
-// session storage. No KeyUpdate, tickets, certificate authentication or DHE.
+// session storage. No KeyUpdate, tickets or certificate authentication.
 Alloc, Ptr, null_ptr = std.mem
 Drop = std.core
 SocketFd = std.net.socket

@@ -31,8 +31,8 @@ security. [TLS scope and commands](TLS13.md).
 3. SHA-512 and HMAC-SHA512/256 for the `crypto_auth` surface.
 4. Implement the exact libsodium directional key-exchange construction using
    the [X25519 primitive](X25519.md). Native TLS now offers explicit
-   `psk_dhe_ke`; certificate authentication, a native server handshake and
-   ALPN remain separate TLS milestones.
+   `psk_dhe_ke` in both client and server roles; certificate authentication,
+   nonblocking server integration and ALPN remain separate TLS milestones.
 5. Secure comparison/erasure and secret-buffer ownership contracts. Entropy
    still comes from OS cryptographic randomness; ordinary `std.core.rand` is
    not a substitute.
