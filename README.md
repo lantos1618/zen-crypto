@@ -21,7 +21,8 @@ that generated backend output is distinct from calling an external crypto librar
   scalar multiplication with caller-owned scratch. See [X25519](docs/X25519.md).
 - `tls13_psk_connect`, `tls13_psk_dhe_connect`, `Tls13Session = tls13_client`:
   reusable external-PSK TLS 1.3 client, with an explicit native X25519 exchange
-  option, authenticated records and shutdown.
+  option, authenticated records and shutdown. Established sessions also expose
+  bounded byte-fed record progress; handshakes remain blocking.
   `tls13_psk_round_trip` remains a convenience wrapper. See [TLS scope](docs/TLS13.md).
 - `tls13_psk_dhe_accept = tls13_server`: native TLS 1.3 server handshake
   over a borrowed connected socket, authenticating the PSK binder and client

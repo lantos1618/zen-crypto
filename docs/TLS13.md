@@ -3,7 +3,8 @@
 The native implementation uses Zen SHA-256, HMAC/HKDF and IETF
 ChaCha20-Poly1305. `src/tls13.zen` provides the key schedule and record layer;
 `src/tls13_client.zen` provides a bounded external-PSK handshake and
-`src/tls13_session.zen` supplies reusable blocking record I/O.
+`src/tls13_session.zen` supplies a resumable record engine and a blocking
+socket driver over that same engine.
 `src/tls13_server.zen` supplies the external-PSK X25519 server handshake.
 There are no OpenSSL or libsodium runtime calls in these modules. Zen still
 uses its C compiler backend and standard OS socket/allocation adapters.
@@ -78,6 +79,55 @@ supports authenticated close_notify as described above; the caller closes the so
 No HTTP/2 or HTTP/1 performance claim follows from
 this TLS work. Independent security review, constant-time analysis and secure
 secret lifecycle management remain unfinished.
+
+## Resumable application records
+
+After a successful handshake, the same `Tls13Session` can be driven without
+performing socket I/O. This does not make the handshake resumable: both connect
+and accept still block. Use the byte-fed methods only after the handshake has
+returned, and keep one serialized owner of the session.
+
+- `queue_record(input, count)` seals one application record, at most 16384
+  bytes. An empty record is allowed. It consumes one sending sequence number
+  exactly once, before the ciphertext is exposed. A second queue attempt while
+  output remains returns `Invalid` without changing that output.
+- `pending_output()` borrows the unacknowledged ciphertext. Do not modify the
+  view or retain it after acknowledging bytes, replacing a drained record,
+  aborting, or any operation that terminates the session.
+- `acknowledge(count)` retires only bytes actually written by the transport.
+  Partial and zero acknowledgements do not reseal the record or change its
+  sequence number. An acknowledgement beyond the pending length is rejected
+  without changing state.
+- `feed(input, count)` retains partial record headers and bodies and consumes
+  at most one complete record per call. Retain and re-offer any unconsumed
+  suffix. While authenticated plaintext remains unread it consumes zero bytes;
+  zero progress is not EOF. Authentication completes before plaintext becomes
+  available. Input and output buffers must not alias session storage.
+- `read_plaintext(output, capacity)` returns `NeedInput`, `Data(count)` or
+  `Closed`. Unlike blocking `read`, `Data(0)` is an authenticated empty record,
+  not closure. Positive capacity is required. The caller bounds repeated
+  empty-record work and schedules buffered work without waiting for another
+  socket event.
+- `queue_close_notify()` queues closure once, after earlier output is drained.
+  Later application queues are rejected; pending ciphertext still needs to be
+  written and acknowledged. Receiving peer closure preserves already queued
+  outbound ciphertext. `feed_eof()` accepts EOF only after authenticated peer
+  closure; otherwise it returns `Truncated` and releases the session.
+
+The blocking methods use these same transitions. A nonempty blocking write
+first flushes pending ciphertext; a blocking read resumes any retained partial
+input. Blocking `close_notify()` flushes pending output and the closure record.
+These methods still require blocking descriptors and caller-managed deadlines.
+The new engine does not interpret OS EAGAIN/EINTR or implement a readiness
+adapter; a future adapter must retain state on recoverable transport outcomes.
+
+Incoming ciphertext, authenticated plaintext and pending outgoing ciphertext
+occupy distinct regions of the existing allocations. Receiving data cannot
+replace pending output. Storage remains 212768 bytes per session, and all
+terminal authentication, protocol, record-limit or truncation failures use the
+same idempotent cleanup as the blocking API. Invalid caller arguments are
+nonterminal. Caller-owned buffers and already delivered plaintext remain the
+caller's responsibility.
 
 ## Primitive and record APIs
 

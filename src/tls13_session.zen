@@ -1,6 +1,11 @@
-// Experimental blocking TLS 1.3 PSK session. Socket ownership and I/O deadlines
-// remain with the caller. One owner must serialize all operations; do not copy
-// session storage. No KeyUpdate, tickets or certificate authentication.
+// Experimental TLS 1.3 PSK record engine with a blocking socket driver.
+// Socket ownership and I/O deadlines remain with the caller. One owner must
+// serialize operations; do not copy session storage. No KeyUpdate, tickets or
+// certificate authentication. The feed/queue/view/ack/read_plaintext APIs do no
+// socket I/O. Blocking read/write/close_notify require a blocking descriptor;
+// they treat EAGAIN as terminal I/O failure. Blocking reads resume partial fed
+// input; blocking writes first flush any queued ciphertext. A reactor must
+// drive only the byte-fed API and supply its own scheduling and I/O policy.
 Alloc, Ptr, null_ptr = std.mem
 Drop = std.core
 SocketFd = std.net.socket
@@ -13,6 +18,13 @@ Tls13ClientError* = Invalid
     | Closed
     | Truncated
 
+// Borrowed read-only ciphertext view. Do not write through data or feed it back
+// into the engine. Invalidate views after acknowledge, a later queue, any fatal
+// feed/driver error, abort or Drop. Other successful feed/read operations leave
+// pending ciphertext unchanged. No caller input/output may alias owner storage.
+Tls13Output* = { data*: Ptr<u8>, count*: usize }
+Tls13Read* = NeedInput | Data(usize) | Closed
+
 Tls13Session* = {
     alloc: Alloc,
     socket: SocketFd,
@@ -22,6 +34,11 @@ Tls13Session* = {
     receiving :: u64,
     buffered :: usize,
     consumed :: usize,
+    record_ready :: bool,
+    incoming :: usize,
+    target :: usize,
+    outgoing :: usize,
+    acknowledged :: usize,
     failed :: bool,
     sent_close :: bool,
     received_close :: bool,
@@ -40,6 +57,11 @@ Tls13Session* = {
             receiving: 0,
             buffered: 0,
             consumed: 0,
+            record_ready: false,
+            incoming: 0,
+            target: 5,
+            outgoing: 0,
+            acknowledged: 0,
             failed: false,
             sent_close: false,
             received_close: false
@@ -49,6 +71,8 @@ Tls13Session* = {
     // Never closes the borrowed descriptor. Idempotent; also called by Drop.
     abort* = (self :: @Self) {
         self.failed = true; self.buffered = 0; self.consumed = 0;
+        self.record_ready = false; self.incoming = 0; self.target = 5;
+        self.outgoing = 0; self.acknowledged = 0;
         (!self.memory.is_null()).then(() {
             Range(0, 180000).loop((i) { self.memory.write(i, 0); });
             self.alloc.free(self.memory); self.memory = null_ptr<u8>();
@@ -58,33 +82,34 @@ Tls13Session* = {
             self.alloc.free(self.scratch); self.scratch = null_ptr<u8>();
         });
     }
-    send_all = (self: @Self, count: usize) Res<(), Tls13ClientError> {
-        at ::= 0;
-        loop(() { at < count }, (h) {
-            n = self.socket.send(
-                self.memory.offset(at),
-                count - at,
-                0
-            ).try(Tls13ClientError.Io);
-            (n > 0).ensure(Tls13ClientError.Io).try(); at = at + n;
-        }); Ok(())
+    // One sealed record may be pending. Borrowed buffers supplied by callers
+    // must not alias session storage. All engine operations require one owner.
+    pending_output* = (self: @Self) Tls13Output {
+        self.failed.match({
+            true  => Tls13Output(data: null_ptr<u8>(), count: 0),
+            false => Tls13Output(
+                data: self.memory.offset(self.acknowledged),
+                count: self.outgoing - self.acknowledged
+            ),
+        })
     }
-    receive_exact = (self: @Self, at: usize, count: usize) Res<(), Tls13ClientError> {
-        done ::= 0;
-        loop(() { done < count }, (h) {
-            n = self.socket.recv(
-                self.memory.offset(at + done),
-                count - done
-            ).try(Tls13ClientError.Io);
-            (n > 0).ensure(Tls13ClientError.Truncated).try(); done = done + n;
-        }); Ok(())
+    acknowledge* = (self :: @Self, count: usize) Res<(), Tls13ClientError> {
+        (!self.failed).ensure(Tls13ClientError.Closed).try();
+        (count <= self.outgoing - self.acknowledged).ensure(
+            Tls13ClientError.Invalid
+        ).try();
+        self.acknowledged = self.acknowledged + count;
+        (self.acknowledged == self.outgoing).then(
+            () { self.outgoing = 0; self.acknowledged = 0; }
+        );
+        Ok(())
     }
-    emit = (self :: @Self, input: Ptr<u8>, count: usize, kind: u8) Res<(), Tls13ClientError> {
+    seal_record = (self :: @Self, input: Ptr<u8>, count: usize, kind: u8) Res<(), Tls13ClientError> {
         (self.sending != 18446744073709551615).ensure(
             Tls13ClientError.Limit
         ).try();
-        key    = self.memory.offset(34000);
-        length = tls13_seal(
+        key           = self.memory.offset(34000);
+        length        = tls13_seal(
             self.memory,
             17000,
             input,
@@ -96,9 +121,151 @@ Tls13Session* = {
             self.scratch.to<u64>(),
             4096
         ).try(Tls13ClientError.Protocol);
-        // Consume the nonce before the first socket write; partial writes cannot retry.
-        self.sending = self.sending + 1;
-        self.send_all(length)
+        self.sending  = self.sending + 1;
+        self.outgoing = length; self.acknowledged = 0;
+        Ok(())
+    }
+    queue_record* = (self :: @Self, input: Ptr<u8>, count: usize) Res<(), Tls13ClientError> {
+        (!self.failed && !self.sent_close && !self.received_close).ensure(
+            Tls13ClientError.Closed
+        ).try();
+        (self.outgoing == 0 && count <= 16384 && (count == 0 || !input.is_null())).ensure(
+            Tls13ClientError.Invalid
+        ).try();
+        self.seal_record(input, count, 23).match({ Ok(_) => Ok(()), Err(e) => { self.abort(); Err(e) } })
+    }
+    queue_close_notify* = (self :: @Self) Res<(), Tls13ClientError> {
+        (!self.failed).ensure(Tls13ClientError.Closed).try();
+        self.sent_close.match({
+            true  => Ok(()),
+            false => {
+                (self.outgoing == 0).ensure(Tls13ClientError.Invalid).try();
+                p = self.memory.offset(33990); p.write(0, 1); p.write(1, 0);
+                self.seal_record(p, 2, 21).match({
+                    Ok(_)  => { self.sent_close = true; Ok(()) },
+                    Err(e) => { self.abort(); Err(e) },
+                })
+            },
+        })
+    }
+    open_record = (self :: @Self) Res<(), Tls13ClientError> {
+        (self.receiving != 18446744073709551615).ensure(
+            Tls13ClientError.Limit
+        ).try();
+        key            = self.memory.offset(34044);
+        part           = tls13_open(
+            self.memory.offset(17000),
+            17000,
+            self.memory.offset(68000),
+            self.target,
+            key,
+            key.offset(32),
+            self.receiving,
+            self.scratch.to<u64>(),
+            4096
+        ).try(Tls13ClientError.Authentication);
+        self.receiving = self.receiving + 1;
+        part.kind.match({
+            23 => { self.buffered = part.count; self.consumed = 0; self.record_ready = true; },
+            21 => {
+                (part.count == 2 && self.memory.read(17001) == 0).ensure(Tls13ClientError.Protocol).try();
+                self.received_close = true;
+            },
+            _  => Err(Tls13ClientError.Protocol).try(),
+        });
+        self.incoming = 0; self.target = 5;
+        Ok(())
+    }
+    feed_inner = (self :: @Self, input: Ptr<u8>, count: usize) Res<usize, Tls13ClientError> {
+        at ::= 0;
+        // At most one header and one body; never process an unbounded record batch.
+        loop(() { at < count && !self.record_ready && !self.received_close }, (
+            h
+        ) {
+            amount = (count - at < self.target - self.incoming).match({true => count - at, false => self.target - self.incoming});
+            self.memory.offset(68000 + self.incoming).copy_from(input.offset(at), amount);
+            self.incoming = self.incoming + amount; at = at + amount;
+            (self.incoming == self.target).then(() {
+                (self.target == 5).match({
+                    true  => {
+                        p = self.memory.offset(68000);
+                        (p.read(0) == 23 && p.read(1) == 3 && p.read(2) == 3).ensure(Tls13ClientError.Protocol).try();
+                        size = p.read(3).to_usize() * 256 + p.read(4).to_usize();
+                        (size >= 17 && size <= 16640).ensure(
+                            Tls13ClientError.Limit
+                        ).try();
+                        self.target = size + 5;
+                    },
+                    false => { self.open_record().try(); h.break(); },
+                });
+            });
+        }); Ok(at)
+    }
+    // Returns consumed bytes. Zero means no input supplied or unread plaintext.
+    // A completed record stops consumption even when more bytes were offered.
+    feed* = (self :: @Self, input: Ptr<u8>, count: usize) Res<usize, Tls13ClientError> {
+        (!self.failed).ensure(Tls13ClientError.Closed).try();
+        (count == 0 || !input.is_null()).ensure(Tls13ClientError.Invalid).try();
+        (!self.received_close || count == 0).ensure(
+            Tls13ClientError.Closed
+        ).try();
+        self.feed_inner(input, count).match({ Ok(n) => Ok(n), Err(e) => { self.abort(); Err(e) } })
+    }
+    // EOF is successful only after an authenticated close_notify.
+    feed_eof* = (self :: @Self) Res<(), Tls13ClientError> {
+        (!self.failed).ensure(Tls13ClientError.Closed).try();
+        self.received_close.match({true => Ok(()), false => { self.abort(); Err(Tls13ClientError.Truncated) }})
+    }
+    read_plaintext* = (self :: @Self, out: Ptr<u8>, capacity: usize) Res<Tls13Read, Tls13ClientError> {
+        (!self.failed).ensure(Tls13ClientError.Closed).try();
+        (!out.is_null() && capacity > 0).ensure(Tls13ClientError.Invalid).try();
+        self.record_ready.match({
+            true  => {
+                amount = (capacity < self.buffered - self.consumed).match({true => capacity, false => self.buffered - self.consumed});
+                (amount > 0).then(
+                    () { out.copy_from(
+                        self.memory.offset(17000 + self.consumed),
+                        amount
+                    ); }
+                );
+                self.consumed = self.consumed + amount;
+                (self.consumed == self.buffered).then(
+                    () { self.record_ready = false; }
+                );
+                Ok(Tls13Read.Data(amount))
+            },
+            false => Ok(
+                self.received_close.match({true => Tls13Read.Closed, false => Tls13Read.NeedInput})
+            ),
+        })
+    }
+    flush_output = (self :: @Self) Res<(), Tls13ClientError> {
+        loop(() { self.outgoing > 0 }, (h) {
+            pending = self.pending_output();
+            n       = self.socket.send(
+                pending.data,
+                pending.count,
+                0
+            ).try(Tls13ClientError.Io);
+            (n > 0).ensure(Tls13ClientError.Io).try();
+            self.acknowledge(n).try();
+        }); Ok(())
+    }
+    receive_progress = (self :: @Self) Res<(), Tls13ClientError> {
+        // Read only the remaining header/body to preserve the next record in
+        // the socket. Temporary input cannot alias the engine's retained bytes.
+        p = self.memory.offset(85000);
+        n = self.socket.recv(
+            p,
+            self.target - self.incoming
+        ).try(Tls13ClientError.Io);
+        (n == 0).match({true => self.feed_eof(), false => { self.feed(p, n).try(); Ok(()) }})
+    }
+    emit = (self :: @Self, input: Ptr<u8>, count: usize) Res<(), Tls13ClientError> {
+        // The blocking driver can finish output previously queued by the engine.
+        self.flush_output().try();
+        self.queue_record(input, count).try();
+        self.flush_output()
     }
     write_inner = (self :: @Self, input: Ptr<u8>, count: usize) Res<usize, Tls13ClientError> {
         offset ::= 0;
@@ -106,8 +273,7 @@ Tls13Session* = {
             length = (count - offset > 16384).match({true => 16384, false => count - offset});
             self.emit(
                 input.offset(offset),
-                length,
-                23
+                length
             ).try(); offset = offset + length;
         }); Ok(count)
     }
@@ -130,7 +296,7 @@ Tls13Session* = {
         (count <= 16384 && (count == 0 || !input.is_null())).ensure(
             Tls13ClientError.Invalid
         ).try();
-        self.emit(input, count, 23).match({Ok(_) => Ok(()), Err(e) => { self.abort(); Err(e) }})
+        self.emit(input, count).match({Ok(_) => Ok(()), Err(e) => { self.abort(); Err(e) }})
     }
     // Compatibility record boundary: reject insufficient capacity without
     // releasing a prefix. Streaming consumers should use read instead.
@@ -146,56 +312,20 @@ Tls13Session* = {
         })
     }
     read_inner = (self :: @Self, out: Ptr<u8>, capacity: usize, allow_empty: bool) Res<usize, Tls13ClientError> {
-        // Bound empty-record work per call instead of allowing an unbounded peer loop.
-        empty ::= 0;
-        loop(() { self.buffered == self.consumed && !self.received_close && !(allow_empty && empty > 0) }, (
-            h
-        ) {
-            (self.receiving != 18446744073709551615).ensure(
-                Tls13ClientError.Limit
-            ).try();
-            self.receive_exact(0, 5).try();
-            p = self.memory;
-            (p.read(0) == 23 && p.read(1) == 3 && p.read(2) == 3).ensure(Tls13ClientError.Protocol).try();
-            count = p.read(3).to_usize() * 256 + p.read(4).to_usize();
-            (count >= 17 && count <= 16640).ensure(
-                Tls13ClientError.Limit
-            ).try();
-            self.receive_exact(5, count).try();
-            key            = p.offset(34044);
-            part           = tls13_open(
-                p.offset(17000),
-                17000,
-                p,
-                count + 5,
-                key,
-                key.offset(32),
-                self.receiving,
-                self.scratch.to<u64>(),
-                4096
-            ).try(Tls13ClientError.Authentication);
-            self.receiving = self.receiving + 1;
-            part.kind.match({
-                23 => {
-                    self.buffered = part.count; self.consumed = 0;
-                    (part.count == 0).then(
-                        () { empty = empty + 1; (empty <= 64).ensure(
-                            Tls13ClientError.Limit
-                        ).try(); }
-                    );
+        empty         ::= 0;
+        result: usize ::= 0;
+        loop((h) {
+            self.read_plaintext(out, capacity).try().match({
+                Data(n)   => {
+                    (n > 0 || allow_empty).then(() { result = n; h.break(); });
+                    empty = empty + 1;
+                    (empty <= 64).ensure(Tls13ClientError.Limit).try();
                 },
-                21 => {
-                    (part.count == 2 && p.read(17001) == 0).ensure(Tls13ClientError.Protocol).try();
-                    self.received_close = true;
-                },
-                _  => Err(Tls13ClientError.Protocol).try(),
+                Closed    => { h.break(); },
+                NeedInput => self.receive_progress().try(),
             });
         });
-        count = (self.buffered - self.consumed > capacity).match({true => capacity, false => self.buffered - self.consumed});
-        (count > 0).then(() {
-            out.copy_from(self.memory.offset(17000 + self.consumed), count);
-            self.consumed = self.consumed + count;
-        }); Ok(count)
+        Ok(result)
     }
     // Returns a bounded portion of one authenticated application record. A zero
     // result means authenticated close_notify; raw EOF is always Truncated.
@@ -210,13 +340,12 @@ Tls13Session* = {
     // Sending close_notify leaves reads available until the peer's notification.
     close_notify* = (self :: @Self) Res<(), Tls13ClientError> {
         (!self.failed).ensure(Tls13ClientError.Closed).try();
-        self.sent_close.match({true => Ok(()), false => {
-            p = self.memory.offset(33990); p.write(0, 1); p.write(1, 0);
-            self.emit(p, 2, 21).match({
-                Ok(_)  => { self.sent_close = true; Ok(()) },
-                Err(e) => { self.abort(); Err(e) },
-            })
-        }})
+        self.close_inner().match({Ok(_) => Ok(()), Err(e) => { self.abort(); Err(e) }})
+    }
+    close_inner = (self :: @Self) Res<(), Tls13ClientError> {
+        self.flush_output().try();
+        self.queue_close_notify().try();
+        self.flush_output()
     }
 }
 Tls13Session.impl(Drop, { drop = (self :: @Self) { self.abort() } })

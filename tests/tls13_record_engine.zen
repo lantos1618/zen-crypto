@@ -1,0 +1,173 @@
+Tls13Session, Tls13ClientError, Tls13Read = tls13_session
+SocketFd = std.net.socket
+oracle, ORACLE_COUNT = record_oracle
+Failure = Mismatch | Accepted | Ownership
+Tracking = { base: Alloc, allocations: Ptr<usize>, frees: Ptr<usize> }
+Tracking.impl(Alloc, {
+    raw = (self: @Self, count: usize, alignment: usize) Res<Ptr<u8>, AllocError> {
+        out = self.base.raw(count, alignment).try();
+        self.allocations.write(0, self.allocations.read(0) + 1); Ok(out)
+    }
+    realloc = <T>(self: @Self, p: Ptr<T>, count: usize) Res<Ptr<T>, AllocError> {
+        p.is_null().ensure(AllocError.OutOfMemory).try();
+        out = self.raw(p.bytes(count), 16).try(); Ok(out.to<T>())
+    }
+    free = <T>(self: @Self, p: Ptr<T>) {
+        self.frees.write(0, self.frees.read(0) + 1); self.base.free(p);
+    }
+})
+new_session = (a: Alloc) Res<Tls13Session, AllocError> {
+    memory  = a.raw(180000, 8).try();
+    scratch = a.raw(32768, 8).match({
+        Ok(p) => Ok(p), Err(e) => { a.free(memory); Err(e) },
+    }).try();
+    Range(0, 32).loop((i) {
+        memory.write(34000 + i, i.to_u8().match({Ok(b) => b, None => 0}));
+        memory.write(34044 + i, (32+i).to_u8().match({Ok(b) => b, None => 0}));
+    });
+    Range(0, 12).loop((i) {
+        memory.write(34032+i, i.to_u8().match({Ok(b) => b, None => 0}));
+        memory.write(34076+i, (12+i).to_u8().match({Ok(b) => b, None => 0}));
+    });
+    Ok(Tls13Session.adopt(a, SocketFd(raw: -1), memory, scratch))
+}
+equal = (a: Ptr<u8>, b: Ptr<u8>, count: usize) bool {
+    Range(0, count).find((i) { a.read(i) != b.read(i) }).match({None => true, Ok(_) => false})
+}
+untouched = (out: Ptr<u8>, count: usize) bool {
+    Range(0, count).find((i) { out.read(i) != 165 }).match({None => true, Ok(_) => false})
+}
+need_input = (session :: Tls13Session, out: Ptr<u8>) Res<(), Failure
+    | Tls13ClientError> {
+    session.read_plaintext(out, 32).try().match({NeedInput => Ok(()), _ => Err(Failure.Mismatch)})
+}
+exercise = (a: Alloc, wire: Ptr<u8>, expected: Ptr<u8>, out: Ptr<u8>) Res<(), AllocError
+    | Failure
+    | Tls13ClientError> {
+    session ::= new_session(a).try();
+    Range(0, 64).loop((i) { out.write(i, 165); });
+    session.need_input(out).try();
+    (session.feed(null_ptr<u8>(), 0).try() == 0).ensure(Failure.Mismatch).try();
+    session.acknowledge(0).try();
+    session.queue_record("outbound".ptr(), 8).try();
+    total = oracle(0, expected);
+    (session.pending_output().count == total && equal(session.pending_output().data, expected, total)).ensure(Failure.Mismatch).try();
+    session.queue_record("next".ptr(), 4).match({Err(Invalid) => Ok(()), _ => Err(Failure.Accepted)}).try();
+    session.acknowledge(total + 1).match({Err(Invalid) => Ok(()), _ => Err(Failure.Accepted)}).try();
+    incoming = oracle(2, wire);
+    Range(0, incoming).loop((i) {
+        session.acknowledge(0).try();
+        (session.feed(wire.offset(i), 1).try() == 1).ensure(Failure.Mismatch).try();
+        (session.pending_output().count == total && equal(session.pending_output().data, expected, total)).ensure(Failure.Mismatch).try();
+        (i + 1 < incoming).then(
+            () { session.need_input(out).try(); untouched(out, 64).ensure(Failure.Mismatch).try(); }
+        );
+    });
+    // A queued authenticated record blocks more ciphertext until plaintext drains.
+    (session.feed(wire, incoming).try() == 0).ensure(Failure.Mismatch).try();
+    session.read_plaintext(out, 2).try().match({Data(n) => (n == 2).ensure(Failure.Mismatch), _ => Err(Failure.Mismatch)}).try();
+    equal(out, "he".ptr(), 2).ensure(Failure.Mismatch).try();
+    session.read_plaintext(out, 32).try().match({Data(n) => (n == 3).ensure(Failure.Mismatch), _ => Err(Failure.Mismatch)}).try();
+    equal(out, "llo".ptr(), 3).ensure(Failure.Mismatch).try();
+    // A short write acknowledgement retains the exact ciphertext suffix.
+    Range(0, total).loop((i) {
+        pending = session.pending_output();
+        (pending.count == total-i && equal(pending.data, expected.offset(i), pending.count)).ensure(Failure.Mismatch).try();
+        session.acknowledge(0).try(); session.acknowledge(1).try();
+    });
+    (session.pending_output().count == 0).ensure(Failure.Mismatch).try();
+    session.queue_record("next".ptr(), 4).try();
+    second = oracle(1, expected);
+    equal(session.pending_output().data, expected, second).ensure(Failure.Mismatch).try();
+    // Record boundaries and sequence advancement across several feed calls.
+    n = oracle(3, wire); extra = oracle(4, wire.offset(n));
+    (session.feed(wire, n+extra).try() == n).ensure(Failure.Mismatch).try();
+    session.read_plaintext(out, 32).try().match({Data(count) => (count==5).ensure(Failure.Mismatch), _=>Err(Failure.Mismatch)}).try();
+    equal(out, "world".ptr(), 5).ensure(Failure.Mismatch).try();
+    (session.feed(wire.offset(n), extra).try()==extra).ensure(Failure.Mismatch).try();
+    session.read_plaintext(out, 32).try().match({Data(count)=>(count==0).ensure(Failure.Mismatch), _=>Err(Failure.Mismatch)}).try();
+    close = oracle(5, wire); (session.feed(wire, close).try()==close).ensure(Failure.Mismatch).try();
+    session.read_plaintext(out, 32).try().match({Closed=>Ok(()), _=>Err(Failure.Mismatch)}).try();
+    session.feed_eof().try();
+    (session.pending_output().count == second && equal(session.pending_output().data, expected, second)).ensure(Failure.Mismatch).try();
+    session.feed(wire, 1).match({Err(Closed)=>Ok(()),_=>Err(Failure.Accepted)}).try();
+    session.acknowledge(second).try();
+    session.queue_close_notify().try();
+    session.queue_record("next".ptr(), 4).match({Err(Closed)=>Ok(()),_=>Err(Failure.Accepted)}).try();
+    close_out = oracle(7, expected);
+    (session.pending_output().count==close_out && equal(session.pending_output().data, expected, close_out)).ensure(Failure.Mismatch).try();
+    session.queue_close_notify().try();
+    (session.pending_output().count==close_out).ensure(Failure.Mismatch).try();
+    session.acknowledge(close_out).try();
+    session.queue_close_notify().try();
+    (session.pending_output().count==0).ensure(Failure.Mismatch).try();
+    session.abort(); session.abort(); Ok(())
+}
+reject = (a: Alloc, wire: Ptr<u8>, out: Ptr<u8>, index: usize, eof: bool) Res<(), AllocError
+    | Failure
+    | Tls13ClientError> {
+    session ::= new_session(a).try();
+    size = oracle(2, wire);
+    Range(0, 64).loop((i){out.write(i, 165);});
+    eof.match({
+        true  => {
+            (session.feed(wire, index).try()==index).ensure(Failure.Mismatch).try();
+            session.feed_eof().match({Err(Truncated)=>Ok(()), _=>Err(Failure.Accepted)}).try();
+        },
+        false => {
+            old = wire.read(index); wire.write(index, (old==0).match({true=>1,false=>0}));
+            rejected = session.feed(wire, size).match({
+                Err(error) => (index >= 5).match({
+                    true  => error.match({Authentication => true, _ => false}),
+                    false => true,
+                }),
+                Ok(_)      => (index == 3 || index == 4).match({
+                    true  => session.feed_eof().match({Err(Truncated) => true, _ => false}),
+                    false => false,
+                }),
+            });
+            rejected.ensure(Failure.Accepted).try();
+        },
+    });
+    untouched(out, 64).ensure(Failure.Mismatch).try();
+    session.read_plaintext(out, 32).match({Err(Closed)=>Ok(()), _=>Err(Failure.Accepted)}).try();
+    untouched(out, 64).ensure(Failure.Mismatch).try();
+    session.abort(); Ok(())
+}
+invalid = (a: Alloc, wire: Ptr<u8>, out: Ptr<u8>) Res<(), AllocError
+    | Failure
+    | Tls13ClientError> {
+    session ::= new_session(a).try();
+    session.queue_record(null_ptr<u8>(), 1).match({Err(Invalid)=>Ok(()),_=>Err(Failure.Accepted)}).try();
+    session.queue_record(out, 16385).match({Err(Invalid)=>Ok(()),_=>Err(Failure.Accepted)}).try();
+    session.feed(null_ptr<u8>(), 1).match({Err(Invalid)=>Ok(()),_=>Err(Failure.Accepted)}).try();
+    session.read_plaintext(out, 0).match({Err(Invalid)=>Ok(()),_=>Err(Failure.Accepted)}).try();
+    session.read_plaintext(null_ptr<u8>(), 1).match({Err(Invalid)=>Ok(()),_=>Err(Failure.Accepted)}).try();
+    session.acknowledge(1).match({Err(Invalid)=>Ok(()),_=>Err(Failure.Accepted)}).try();
+    session.queue_record("outbound".ptr(), 8).try();
+    count =oracle(0, wire); equal(session.pending_output().data, wire, count).ensure(Failure.Mismatch).try();
+    session.acknowledge(count).try();
+    session.queue_close_notify().try();
+    session.queue_record("x".ptr(), 1).match({Err(Closed) => Ok(()), _ => Err(Failure.Accepted)}).try();
+    close = oracle(8, wire);
+    (session.pending_output().count == close && equal(session.pending_output().data, wire, close)).ensure(Failure.Mismatch).try();
+    session.acknowledge(1).try(); session.queue_close_notify().try();
+    (session.pending_output().count == close - 1 && equal(session.pending_output().data, wire.offset(1), close - 1)).ensure(Failure.Mismatch).try();
+    session.abort(); Ok(())
+}
+main = (env: Env) Res<(), AllocError | Failure | Tls13ClientError> {
+    base =env.mem.alloc(); counters=base.realloc<usize>(
+        null_ptr<usize>(),
+        2
+    ).try();
+    counters.write(0, 0); counters.write(1, 0);
+    a    =Tracking(base:base, allocations:counters, frees:counters.offset(1));
+    wire =base.raw(256, 8).try(); expected=base.raw(256, 8).try(); out=base.raw(64, 8).try();
+    exercise(a, wire, expected, out).try(); invalid(a, wire, out).try();
+    Range(0, 27).loop((i){ reject(a, wire, out, i, false).try(); reject(a, wire, out, i, true).try(); });
+    (counters.read(0)==112 && counters.read(1)==112).ensure(Failure.Ownership).try();
+    println(
+        "record engine: partial I/O, duplex, nonce continuity, 27 mutations, 27 EOF cuts, invalid bounds and 112 frees PASS"
+    );
+    Ok(())
+}
