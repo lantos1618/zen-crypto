@@ -1,0 +1,37 @@
+Native PSK-DHE OS entropy example validation, 2026-09-29
+
+The example and helper included with this report passed on macOS arm64 and
+Linux x86_64 under UBSan. Both runs checked an exchange and authenticated
+close_notify against an OpenSSL 3.5.4 test peer, a getentropy reference in the
+native binary, and absence of unresolved external crypto symbols.
+
+Linux provenance:
+  crypto source: ba29487346be89dc299e870bdee64941d957bed6
+  compiler source: f506c9cbf22cf1c2367f5be78d642aac27c81e92
+  compiler binary SHA256:
+    a7ff87fdb092ca8f3baf6ed220960e89e037882d0a067ab145b0f4f332854986
+  std: 143c24150b86d2f74f7fbb8e35a18dc1d41bdd03 (entropy change)
+  std change subsequently merged in main 17e519675927b3d9b808b223b80b1922a77e2acf
+  Python 3.12.3, Clang 18.1.3, OpenSSL 3.5.4
+
+The new example and helper were copied before publication into ignored staging:
+  /home/ubuntu/zen-native-crypto-validation-20260928/zen-crypto/build/entropy-example-validation
+The compiler checkout was not modified. The entropy std came from a separate
+checkout of its published branch. Run from the staging directory:
+
+  ZEN_COMPILER=/home/ubuntu/zen-native-crypto-validation-20260928/zen/build/bootstrap/zen-seed \
+  ZEN_STD=/home/ubuntu/zen-native-crypto-validation-20260928/zen-entropy/src \
+  OPENSSL=/home/ubuntu/zen-http-validation-20260928-1952/zen-http/build/openssl/bin/openssl \
+  python3 scripts/check-native-psk-example.py
+
+Result: exit 0
+  Native PSK-DHE echo and authenticated close: true
+  PASS two independent std.entropy calls, UBSan, OpenSSL peer and no linked external crypto
+
+Retained Linux log:
+  /home/ubuntu/zen-native-crypto-validation-20260928/entropy-example-linux.log
+Local log: /tmp/native-psk-example.log
+
+This validates one blocking loopback example, not entropy quality, production
+PSK provisioning, certificate authentication, secure erasure or performance.
+The helper uses temporary test credentials in process arguments.

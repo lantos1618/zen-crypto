@@ -48,8 +48,9 @@ Backend code formerly in this repository has moved:
 Update explicit build dependencies and include paths to the new packages.
 The module names `sodium` and `tls` are retained there. No compatibility forwarding
 modules remain here: importing this package does not silently pull in a backend.
-`zen-http` uses `zen-openssl` for working TLS. This separation does not implement
-certificate-based native TLS or remove OpenSSL from HTTPS applications.
+`zen-http` now has an explicit experimental HTTP client over native PSK sessions.
+Its default certificate-verified client, event-driven server and HTTP/2 still
+use `zen-openssl`. This separation does not implement certificate-based native TLS.
 
 ## Build and test without crypto backends
 
@@ -114,5 +115,29 @@ ownership are separate requirements; `std.core.rand` is not a cryptographic RNG.
 
 The TLS implementation and its supported profile are described in
 [Native TLS 1.3](docs/TLS13.md). OpenSSL is a reference peer for interoperability
-tests, not linked into the native client. Existing zen-http HTTPS still uses
-zen-openssl. No native TLS performance advantage has been measured.
+tests, not linked into the native endpoints. The explicit
+[`zen-http` native client](https://github.com/lantos1618/zen-http#experimental-native-tls-client)
+uses these sessions; the default HTTPS paths still use zen-openssl.
+No native TLS performance advantage has been measured.
+
+## Native connection example with OS entropy
+
+[examples/native_psk_client.zen](examples/native_psk_client.zen) demonstrates a
+loopback PSK-DHE connection with separate `std.entropy.fill_random` calls for
+public handshake randomness and the secret ephemeral key. It needs the compiler
+and std from merged [Zen PR #10](https://github.com/lantos1618/zen/pull/10),
+main commit `17e51967`, or newer.
+The helper generates a temporary test PSK, builds the native executable under
+UBSan, and verifies an exchange and authenticated shutdown against OpenSSL:
+
+```sh
+ZEN_COMPILER=/path/to/zen/zen ZEN_STD=/path/to/zen/src \
+OPENSSL=/path/to/openssl python3 scripts/check-native-psk-example.py
+```
+
+OpenSSL is only the external test peer. The helper checks that the executable
+calls OS `getentropy` and has no external crypto symbols. This is a blocking
+loopback example; its command-line PSK is test-only, not production secret
+provisioning. Ordinary cleanup stores do not guarantee secure erasure.
+[macOS/Linux validation](tests/validation/native-psk-example-2026-09-29.txt)
+records the compiler/std revisions and the pre-publication test setup.

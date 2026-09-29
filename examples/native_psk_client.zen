@@ -1,0 +1,82 @@
+// Loopback demonstration, not a general HTTPS client. Usage: client TEST_PSK_HEX PORT
+// argv is visible to local process inspection: never pass production credentials.
+// Run scripts/check-native-psk-example.py for a temporary OpenSSL test peer.
+// Blocking socket I/O; the demonstration runner applies a process timeout.
+Socket, SocketFd, SocketFault = std.net.socket
+fill_random, EntropyError = std.entropy
+tls13_psk_dhe_connect, Tls13ClientError = tls13_client
+DemoError = Invalid | UnexpectedResponse
+
+nibble = (v: u8) Res<u8, DemoError> {
+    (v >= 48 && v <= 57).match({
+        true  => Ok(v - 48),
+        false => {
+            (v >= 97 && v <= 102).ensure(DemoError.Invalid).try(); Ok(v - 87)
+        },
+    })
+}
+exchange = (a: Alloc, socket: SocketFd, bytes: Ptr<u8>) Res<(), AllocError
+    | Tls13ClientError
+    | DemoError> {
+    session ::= tls13_psk_dhe_connect(
+        a,
+        socket,
+        "ZenTest",
+        bytes,
+        32,
+        bytes.offset(32),
+        bytes.offset(64)
+    ).try();
+    // The handshake no longer needs our PSK/private copies. Ordinary stores,
+    // not a guaranteed secure-erasure barrier; the test argv still holds PSK.
+    Range(0, 32).loop((i) { bytes.write(i, 0); bytes.write(64 + i, 0); });
+    request: str = "native zen\n"; expected: str = "nez evitan\n";
+    (session.write(request.ptr(), request.len).try() == request.len).ensure(DemoError.UnexpectedResponse).try();
+    output = bytes.offset(96); received ::= 0;
+    loop(() { received < expected.len }, (h) {
+        count = session.read(
+            output.offset(received),
+            expected.len - received
+        ).try();
+        (count > 0).ensure(
+            DemoError.UnexpectedResponse
+        ).try(); received = received + count;
+    });
+    Range(0, expected.len).loop((i) { (output.read(i) == expected.ptr().read(i)).ensure(DemoError.UnexpectedResponse).try(); });
+    session.close_notify().try();
+    (session.read(output, 64).try() == 0).ensure(DemoError.UnexpectedResponse).try();
+    println("Native PSK-DHE echo and authenticated close: true"); Ok(())
+}
+main = (env: Env) Res<(), AllocError
+    | SocketFault
+    | EntropyError
+    | Tls13ClientError
+    | DemoError> {
+    key_hex   = env.argv.get(1).ok_or(DemoError.Invalid).try();
+    port_text = env.argv.get(2).ok_or(DemoError.Invalid).try();
+    (key_hex.len == 64 && port_text.len > 0 && port_text.len <= 5).ensure(
+        DemoError.Invalid
+    ).try();
+    port: u64 ::= 0;
+    Range(0, port_text.len).loop((i) {
+        digit = port_text.ptr().read(i); (digit >= 48 && digit <= 57).ensure(DemoError.Invalid).try();
+        port = port * 10 + (digit - 48).to_u64();
+    });
+    (port > 0 && port <= 65535).ensure(DemoError.Invalid).try();
+    a = env.mem.alloc(); bytes = a.raw(160, 8).try();
+    @scope.defer(
+        () { Range(0, 160).loop((i) { bytes.write(i, 0); }); a.free(bytes); }
+    );
+    Range(0, 32).loop((i) { bytes.write(i, nibble(key_hex.ptr().read(i * 2)).try() * 16 + nibble(key_hex.ptr().read(i * 2 + 1)).try()); });
+    // Public handshake random and private key MUST be independently generated.
+    // Never reuse the public bytes as the private key, and never use core.rand.
+    fill_random(bytes.offset(32), 32).try();
+    fill_random(bytes.offset(64), 32).try();
+    socket ::= Socket.tcp_connect(
+        a,
+        "127.0.0.1",
+        port.to_u16().ok_or(DemoError.Invalid).try()
+    ).try();
+    exchange(a, socket.handle(), bytes).try(); // Session drops before socket.
+    socket.close(); Ok(())
+}
