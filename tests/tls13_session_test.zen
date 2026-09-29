@@ -1,0 +1,127 @@
+Socket, SocketFault, SocketFd = std.net.socket
+tls13_psk_connect, tls13_psk_round_trip, Tls13ClientError = tls13_client
+Shutdown = c.bind("sys/socket.h", { shutdown = (fd: i32, how: i32) i32 })
+AlignmentAlloc = { base: Alloc, byte_requests: Ptr<usize>, word_requests: Ptr<usize>, odd: Ptr<Ptr<u8>>, frees: Ptr<usize> }
+AlignmentAlloc.impl(Alloc, {
+    raw = (self: @Self, count: usize, align: usize) Res<Ptr<u8>, AllocError> {
+        (align >= 8).match({
+            true  => { self.word_requests.write(0, self.word_requests.read(0) + 1); self.base.raw(count, align) },
+            false => {
+                self.byte_requests.write(0, self.byte_requests.read(0) + 1);
+                allocated = self.base.raw(count + 1, 8).try(); self.odd.write(0, allocated.offset(1)); Ok(allocated.offset(1))
+            },
+        })
+    }
+    realloc = <T>(self: @Self, pointer: Ptr<T>, count: usize) Res<Ptr<T>, AllocError> {
+        pointer.is_null().ensure(AllocError.OutOfMemory).try();
+        self.byte_requests.write(0, self.byte_requests.read(0) + 1);
+        allocated = self.base.raw(pointer.bytes(count) + 1, 8).try();
+        self.odd.write(0, allocated.offset(1)); Ok(allocated.offset(1).to<T>())
+    }
+    free = <T>(self: @Self, pointer: Ptr<T>) {
+        self.frees.write(0, self.frees.read(0) + 1);
+        pointer.to<u8>().same(self.odd.read(0)).match({true => self.base.free(pointer.to<u8>().back(1)), false => self.base.free(pointer)});
+    }
+})
+
+exercise = (a: Alloc, socket: SocketFd, psk: Ptr<u8>, random: Ptr<u8>, data: Ptr<u8>, output: Ptr<u8>) Res<bool, Tls13ClientError
+    | AllocError> {
+    session ::= tls13_psk_connect(a, socket, "ZenTest", psk, 32, random).try();
+    // DISCONNECT_TEST
+    invalid = session.read(
+        output,
+        0
+    ).match({Ok(_) => false, Err(e) => e.match({Invalid => true, _ => false})});
+    invalid.ensure(Tls13ClientError.Invalid).try();
+    (MODE == 7).then(() {
+        Range(0, 100).loop((i) {
+            text: str = "native zen\n";
+            session.write(text.ptr(), text.len).try();
+            total ::= 0;
+            loop(() { total < 11 }, (h) {
+                n = session.read(output.offset(total), 3).try();
+                (n > 0).ensure(
+                    Tls13ClientError.Protocol
+                ).try(); total = total + n;
+            });
+            expected: str = "nez evitan\n";
+            Range(0, 11).loop((j) { (output.read(j) == expected.ptr().read(j)).ensure(Tls13ClientError.Protocol).try(); });
+        });
+    });
+    (MODE != 7).then(() {
+        (session.write(data, 50000).try() == 50000).ensure(Tls13ClientError.Protocol).try();
+        (MODE == 0 || MODE == 3).then(() {
+            wanted = (MODE == 0).match({true => 50000, false => 100});
+            total ::= 0;
+            loop(() { total < wanted }, (h) {
+                n = session.read(output, 137).try();
+                (n > 0 && n <= 137 && n <= wanted - total).ensure(
+                    Tls13ClientError.Protocol
+                ).try();
+                Range(0, n).loop((i) { (output.read(i) == data.read(total + i)).ensure(Tls13ClientError.Protocol).try(); });
+                total = total + n;
+            });
+        });
+    });
+    (MODE == 0 || MODE == 7).match({true => {
+        session.close_notify().try(); session.close_notify().try();
+        (session.read(output, 137).try() == 0).ensure(Tls13ClientError.Protocol).try();
+        (session.read(output, 137).try() == 0).ensure(Tls13ClientError.Protocol).try();
+        blocked = session.write(
+            data,
+            1
+        ).match({Ok(_) => false, Err(e) => e.match({Closed => true, _ => false})});
+        blocked.ensure(Tls13ClientError.Protocol).try();
+    }, false => {
+        Range(0, 137).loop((i) { output.write(i, 165); });
+        rejected = session.read(
+            output,
+            137
+        ).match({Ok(_) => false, Err(e) => e.match({
+            Truncated      => MODE == 2,
+            Authentication => MODE == 1 || MODE == 3,
+            Protocol       => MODE == 4,
+            Limit          => MODE == 5 || MODE == 6,
+            _              => false,
+        })});
+        rejected.ensure(Tls13ClientError.Protocol).try();
+        Range(0, 137).loop((i) { (output.read(i) == 165).ensure(Tls13ClientError.Protocol).try(); });
+        blocked = session.read(
+            output,
+            137
+        ).match({Ok(_) => false, Err(e) => e.match({Closed => true, _ => false})});
+        blocked.ensure(Tls13ClientError.Protocol).try();
+        session.abort(); session.abort();
+    }});
+    Ok(true)
+}
+main = (env: Env) Res<i32, AllocError | SocketFault> {
+    a      = env.mem.alloc();
+    memory = a.raw(51000, 8).try(); @scope.defer(() { a.free(memory); });
+    psk = memory; random = memory.offset(32); data = memory.offset(64); output = memory.offset(50100);
+    Range(0, 32).loop((i) { psk.write(i, i.to_u8().match({Ok(v) => v, None => 0})); });
+    Range(0, 50000).loop((i) { data.write(i, (i % 251 + 1).to_u8().match({Ok(v) => v, None => 0})); });
+    // RANDOM
+    counters = a.raw(40, 8).try(); @scope.defer(() { a.free(counters); });
+    byte_requests = counters.to<usize>(); word_requests = byte_requests.offset(1); frees = byte_requests.offset(2); odd = counters.offset(24).to<Ptr<u8>>();
+    byte_requests.write(0, 0); word_requests.write(0, 0); frees.write(0, 0); odd.write(0, null_ptr<u8>());
+    aligned = AlignmentAlloc(
+        base: a,
+        byte_requests: byte_requests,
+        word_requests: word_requests,
+        odd: odd,
+        frees: frees
+    );
+    socket ::= Socket.tcp_connect(a, "127.0.0.1", TEST_PORT).try();
+    good       = exercise(
+        aligned,
+        socket.handle(),
+        psk,
+        random,
+        data,
+        output
+    ).match({Ok(v) => v, Err(_) => false});
+    aligned_ok = byte_requests.read(0) == 0 && word_requests.read(0) == 2 && frees.read(0) == 2;
+    println("session behavior: {} alignment and release: {}", good, aligned_ok);
+    socket.close(); Ok((good && aligned_ok).match({true => 0, false => 1}))
+}

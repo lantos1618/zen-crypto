@@ -2,13 +2,13 @@
 // psk_ke only: no certificates, (EC)DHE, HRR, early data or session tickets.
 // The caller owns the connected socket, configures I/O deadlines, and supplies
 // fresh cryptographically random 32 bytes for each handshake. Blocking I/O.
-// Receives one application record, not a general streaming TLS connection.
+// connect returns a reusable authenticated session; round_trip is a compatibility helper.
 Alloc, AllocError, Ptr, null_ptr = std.mem
 SocketFd = std.net.socket
 ByteReader, ByteWriter, ByteError = std.bytes
 sha256_candidate = sha256
 tls13_binder, tls13_handshake_secrets, tls13_application_secrets, tls13_traffic_keys, tls13_finished, tls13_seal, tls13_open = tls13
-Tls13ClientError* = Invalid | Io | Protocol | Authentication | Limit
+Tls13ClientError*, Tls13Session* = tls13_session
 read_exact = (
     socket : SocketFd,
     bytes  : Ptr<u8>,
@@ -103,15 +103,43 @@ server_hello = (message: Ptr<u8>, count: usize) Res<(), Tls13ClientError
     });
     (version && selected).ensure(Tls13ClientError.Protocol)
 }
-tls13_psk_round_trip* = (a: Alloc, socket: SocketFd, identity: str, psk: Ptr<u8>, psk_count: usize, random: Ptr<u8>, request: Ptr<u8>, request_count: usize, response: Ptr<u8>, response_capacity: usize) Res<usize, Tls13ClientError
+tls13_psk_connect* = (a: Alloc, socket: SocketFd, identity: str, psk: Ptr<u8>, psk_count: usize, random: Ptr<u8>) Res<Tls13Session, Tls13ClientError
     | AllocError> {
-    (!psk.is_null() && psk_count > 0 && !random.is_null() && identity.len > 0 && identity.len <= 255 && request_count <= 16384 && (request_count == 0 || !request.is_null()) && !response.is_null()).ensure(
+    (!psk.is_null() && psk_count > 0 && !random.is_null() && identity.len > 0 && identity.len <= 255).ensure(
         Tls13ClientError.Invalid
     ).try();
-    // Alloc's generic method currently erases its element type at trait calls.
-    // Request alignment explicitly before constructing native word views.
-    memory = a.raw(180000, 8).try(); @scope.defer(() { a.free(memory); });
-    scratch_bytes = a.raw(32768, 8).try(); @scope.defer(() { a.free(scratch_bytes); });
+    memory        = a.raw(180000, 8).try();
+    scratch_bytes = a.raw(32768, 8).match({
+        Ok(p) => Ok(p), Err(e) => { a.free(memory); Err(e) },
+    }).try();
+    handshake(
+        a,
+        socket,
+        identity,
+        psk,
+        psk_count,
+        random,
+        memory,
+        scratch_bytes
+    ).match({
+        Ok(session) => Ok(consume session),
+        Err(e)      => {
+            Range(0, 180000).loop((i) { memory.write(i, 0); });
+            Range(0, 32768).loop((i) { scratch_bytes.write(i, 0); });
+            a.free(scratch_bytes); a.free(memory); Err(e)
+        },
+    })
+}
+handshake = (
+    a             : Alloc,
+    socket        : SocketFd,
+    identity      : str,
+    psk           : Ptr<u8>,
+    psk_count     : usize,
+    random        : Ptr<u8>,
+    memory        : Ptr<u8>,
+    scratch_bytes : Ptr<u8>
+) Res<Tls13Session, Tls13ClientError> {
     scratch = scratch_bytes.to<u64>();
     record  = memory; plain = memory.offset(17000); pending = memory.offset(34000); transcript = memory.offset(100000);
     schedule = memory.offset(166000); app = memory.offset(166200); keys = memory.offset(166400); digest = memory.offset(166600); verify = memory.offset(166700); hash_work = memory.offset(167000); hash_words = memory.offset(167104).to<u32>();
@@ -236,23 +264,26 @@ tls13_psk_round_trip* = (a: Alloc, socket: SocketFd, identity: str, psk: Ptr<u8>
     plain.write(0, 20); plain.write(1, 0); plain.write(2, 0); plain.write(3, 32); plain.offset(4).copy_from(verify, 32);
     tls13_traffic_keys(keys, 44, schedule.offset(64), scratch, 4096).ensure(Tls13ClientError.Invalid).try();
     size ::= tls13_seal(record, 17000, plain, 36, 22, keys, keys.offset(32), 0, scratch, 4096).try(Tls13ClientError.Invalid); write_all(socket, record, size).try();
-    tls13_traffic_keys(keys, 44, app.offset(32), scratch, 4096).ensure(Tls13ClientError.Invalid).try();
-    size = tls13_seal(record, 17000, request, request_count, 23, keys, keys.offset(32), 0, scratch, 4096).try(Tls13ClientError.Invalid); write_all(socket, record, size).try();
-    tls13_traffic_keys(keys, 44, app.offset(64), scratch, 4096).ensure(Tls13ClientError.Invalid).try();
-    size = read_record(socket, record).try();
-    part = tls13_open(
-        plain,
-        17000,
-        record,
-        size,
-        keys,
-        keys.offset(32),
-        0,
-        scratch,
-        4096
-    ).try(Tls13ClientError.Authentication);
-    (part.kind == 23 && part.count <= response_capacity).ensure(
-        Tls13ClientError.Protocol
+    tls13_traffic_keys(memory.offset(34000), 44, app.offset(32), scratch, 4096).ensure(Tls13ClientError.Invalid).try();
+    tls13_traffic_keys(memory.offset(34044), 44, app.offset(64), scratch, 4096).ensure(Tls13ClientError.Invalid).try();
+    // Handshake secrets and transcript are no longer needed by the session.
+    Range(34088, 180000).loop((i) { memory.write(i, 0); });
+    Range(0, 32768).loop((i) { scratch_bytes.write(i, 0); });
+    Ok(Tls13Session.adopt(a, socket, memory, scratch_bytes))
+}
+tls13_psk_round_trip* = (a: Alloc, socket: SocketFd, identity: str, psk: Ptr<u8>, psk_count: usize, random: Ptr<u8>, request: Ptr<u8>, request_count: usize, response: Ptr<u8>, response_capacity: usize) Res<usize, Tls13ClientError
+    | AllocError> {
+    (request_count <= 16384 && (request_count == 0 || !request.is_null()) && !response.is_null()).ensure(
+        Tls13ClientError.Invalid
     ).try();
-    (part.count > 0).then(() { response.copy_from(plain, part.count); }); Ok(part.count)
+    session ::= tls13_psk_connect(
+        a,
+        socket,
+        identity,
+        psk,
+        psk_count,
+        random
+    ).try();
+    session.write_record(request, request_count).try();
+    session.read_record(response, response_capacity)
 }
