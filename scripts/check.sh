@@ -20,3 +20,7 @@ sh scripts/check-blake2b-native.sh
 
 "${PYTHON:-python3}" scripts/check-sha256.py
 sh scripts/check-chacha20poly1305-native.sh
+
+"$compiler" build test-x25519 > build/x25519-project-compile.log 2>&1
+./build/test-x25519
+"${PYTHON:-python3}" scripts/check-x25519.py

@@ -24,5 +24,17 @@ build = (b :: Builder) Res<(), BuildError> {
         "test-chacha20poly1305",
         {src: Path("tests/chacha20poly1305_native.zen"), deps: [aead], out: Ok(Path("build/test-chacha20poly1305"))}
     ).try();
+    x25519 = b.lib(
+        "x25519",
+        {src: Path("src/x25519.zen"), libs: [], paths: []}
+    ).try();
+    x25519_support = b.lib(
+        "x25519_test_support",
+        {src: Path("tests/x25519_test_support.zen"), libs: [], paths: []}
+    ).try();
+    b.exe(
+        "test-x25519",
+        {src: Path("tests/x25519_native_test.zen"), deps: [x25519, x25519_support], out: Ok(Path("build/test-x25519"))}
+    ).try();
     Ok(())
 }

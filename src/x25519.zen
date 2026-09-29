@@ -1,0 +1,178 @@
+// Experimental native X25519, RFC 7748 sections 5 and 6.1.
+// No external crypto, allocation, erasure or production constant-time guarantee.
+// Inputs span 32 readable bytes. Output spans capacity writable bytes.
+// Scratch is >=352 aligned u64 words, disjoint from all input/output spans.
+// Output may overlap either input: both inputs are consumed before output writes.
+// Caller retains ownership; no pointer escapes the call. Scratch contains secrets
+// afterward. Invalid arguments and all-zero shared secrets leave output unchanged.
+Ptr = std.mem
+Range = std.core
+bit_xor, to_u64, to_usize, to_u8 = std.core.num
+
+x25519_public_key* = (
+    output: Ptr<u8>, capacity: usize, private_key: Ptr<u8>,
+    scratch: Ptr<u64>, scratch_words: usize
+) bool {
+    valid(output, capacity, private_key, scratch, scratch_words).match({
+        false => false,
+        true => {
+            constant(scratch, 9);
+            evaluate(output, private_key, scratch)
+        },
+    })
+}
+
+x25519_shared_secret* = (
+    output: Ptr<u8>, capacity: usize, private_key: Ptr<u8>, peer_public: Ptr<u8>,
+    scratch: Ptr<u64>, scratch_words: usize
+) bool {
+    (valid(output, capacity, private_key, scratch, scratch_words) && !peer_public.is_null()).match({
+        false => false,
+        true => {
+            decode(scratch, peer_public);
+            evaluate(output, private_key, scratch)
+        },
+    })
+}
+
+valid = (out: Ptr<u8>, capacity: usize, key: Ptr<u8>, scratch: Ptr<u64>, words: usize) bool {
+    !out.is_null() && capacity >= 32 && !key.is_null() && !scratch.is_null() && words >= 352
+}
+byte = (value: u64) u8 { value.to_usize().value_or(0).to_u8().value_or(0) }
+power = (exponent: usize) u64 {
+    result: u64 ::= 1;
+    Range(0, exponent).loop((_) { result = result * 2; });
+    result
+}
+constant = (out: Ptr<u64>, value: u64) {
+    Range(0, 17).loop((i) { out.write(i, 0); });
+    out.write(0, value);
+}
+copy = (out: Ptr<u64>, input: Ptr<u64>) {
+    Range(0, 17).loop((i) { out.write(i, input.read(i)); });
+}
+
+// Radix 2^15, 17 limbs. All public field operations return canonical limbs.
+// Multiplication accumulates <=17*(32767^2) per limb (<2^35); folding high
+// limbs by 19 remains <2^39. Three fixed carry passes suffice: after pass 1
+// only limb 0 is unnormalized; pass 2 has top carry <=1; if it is 1 all
+// intervening limbs have wrapped, so pass 3 cannot produce another top carry.
+reduce = (v: Ptr<u64>) {
+    Range(0, 3).loop((_) {
+        carry: u64 ::= 0;
+        Range(0, 17).loop((i) {
+            n = v.read(i) + carry;
+            v.write(i, n % 32768);
+            carry = n / 32768;
+        });
+        v.write(0, v.read(0) + carry * 19);
+    });
+    // v + 19 overflows 255 bits precisely when v >= p. Add 19 only then,
+    // discarding that final carry, equivalent to subtraction of p.
+    carry: u64 ::= 19;
+    Range(0, 17).loop((i) { carry = (v.read(i) + carry) / 32768; });
+    carry = carry * 19;
+    Range(0, 17).loop((i) {
+        n = v.read(i) + carry;
+        v.write(i, n % 32768);
+        carry = n / 32768;
+    });
+}
+add = (out: Ptr<u64>, a: Ptr<u64>, b: Ptr<u64>) {
+    Range(0, 17).loop((i) { out.write(i, a.read(i) + b.read(i)); });
+    reduce(out);
+}
+subtract = (out: Ptr<u64>, a: Ptr<u64>, b: Ptr<u64>) {
+    Range(0, 17).loop((i) {
+        p: u64 = (i == 0).match({true => 32749, false => 32767});
+        out.write(i, a.read(i) + 2 * p - b.read(i));
+    });
+    reduce(out);
+}
+multiply = (out: Ptr<u64>, a: Ptr<u64>, b: Ptr<u64>, work: Ptr<u64>) {
+    Range(0, 33).loop((i) { work.write(i, 0); });
+    Range(0, 17).loop((i) {
+        Range(0, 17).loop((j) {
+            work.write(i + j, work.read(i + j) + a.read(i) * b.read(j));
+        });
+    });
+    Range(0, 16).loop((i) { work.write(i, work.read(i) + 19 * work.read(i + 17)); });
+    copy(out, work);
+    reduce(out);
+}
+scale = (out: Ptr<u64>, input: Ptr<u64>) {
+    Range(0, 17).loop((i) { out.write(i, input.read(i) * 121665); });
+    reduce(out);
+}
+swap = (a: Ptr<u64>, b: Ptr<u64>, bit: u64) {
+    Range(0, 17).loop((i) {
+        difference = a.read(i).bit_xor(b.read(i)) * bit;
+        a.write(i, a.read(i).bit_xor(difference));
+        b.write(i, b.read(i).bit_xor(difference));
+    });
+}
+decode = (out: Ptr<u64>, input: Ptr<u8>) {
+    constant(out, 0);
+    Range(0, 32).loop((i) {
+        value = input.read(i).to_u64();
+        masked = (i == 31).match({true => value % 128, false => value});
+        limb = i * 8 / 15;
+        n = masked * power(i * 8 % 15);
+        out.write(limb, out.read(limb) + n % 32768);
+        (limb < 16).then(() { out.write(limb + 1, out.read(limb + 1) + n / 32768); });
+    });
+    reduce(out);
+}
+encode = (out: Ptr<u8>, input: Ptr<u64>) {
+    Range(0, 32).loop((i) {
+        limb = i * 8 / 15;
+        n: u64 ::= input.read(limb);
+        (limb < 16).then(() { n = n + input.read(limb + 1) * 32768; });
+        out.write(i, byte(n / power(i * 8 % 15) % 256));
+    });
+}
+
+evaluate = (output: Ptr<u8>, private_key: Ptr<u8>, s: Ptr<u64>) bool {
+    x1 = s; x2 = s.offset(17); z2 = s.offset(34); x3 = s.offset(51); z3 = s.offset(68);
+    a = s.offset(85); b = s.offset(102); aa = s.offset(119); bb = s.offset(136);
+    e = s.offset(153); c = s.offset(170); d = s.offset(187);
+    da = s.offset(204); cb = s.offset(221); temp = s.offset(238); temp2 = s.offset(255);
+    inverse = s.offset(272); work = s.offset(306);
+    scalar = s.offset(340).to<u8>(); result = s.offset(344).to<u8>();
+    scalar.copy_from(private_key, 32);
+    scalar.write(0, byte(scalar.read(0).to_u64() / 8 * 8));
+    scalar.write(31, byte(scalar.read(31).to_u64() % 64 + 64));
+    constant(x2, 1); constant(z2, 0); copy(x3, x1); constant(z3, 1);
+    previous: u64 ::= 0;
+    Range(0, 255).loop((step) {
+        t = 254 - step;
+        bit = scalar.read(t / 8).to_u64() / power(t % 8) % 2;
+        choice = previous.bit_xor(bit);
+        swap(x2, x3, choice); swap(z2, z3, choice); previous = bit;
+        add(a, x2, z2); multiply(aa, a, a, work);
+        subtract(b, x2, z2); multiply(bb, b, b, work);
+        subtract(e, aa, bb); add(c, x3, z3); subtract(d, x3, z3);
+        multiply(da, d, a, work); multiply(cb, c, b, work);
+        add(temp, da, cb); multiply(x3, temp, temp, work);
+        subtract(temp, da, cb); multiply(temp2, temp, temp, work); multiply(z3, x1, temp2, work);
+        multiply(x2, aa, bb, work);
+        scale(temp, e); add(temp, aa, temp); multiply(z2, e, temp, work);
+    });
+    swap(x2, x3, previous); swap(z2, z3, previous);
+    // Fermat inversion: p-2 = 2^255-21 has all bits set except bits 2 and 4.
+    // The branch below depends only on the public iteration index.
+    constant(inverse, 1);
+    Range(0, 255).loop((step) {
+        bit = 254 - step;
+        multiply(inverse, inverse, inverse, work);
+        (bit != 2 && bit != 4).then(() { multiply(inverse, inverse, z2, work); });
+    });
+    multiply(temp, x2, inverse, work);
+    encode(result, temp);
+    nonzero: u64 ::= 0;
+    Range(0, 32).loop((i) { nonzero = nonzero + result.read(i).to_u64(); });
+    (nonzero != 0).match({
+        false => false,
+        true => { output.copy_from(result, 32); true },
+    })
+}
