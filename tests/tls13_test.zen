@@ -1,4 +1,4 @@
-tls13_expand_label, tls13_derive_secret, tls13_finished, tls13_binder, tls13_handshake_secrets, tls13_application_secrets, tls13_traffic_keys, tls13_seal, tls13_open, Tls13Error = tls13
+tls13_expand_label, tls13_derive_secret, tls13_finished, tls13_binder, tls13_handshake_secrets, tls13_handshake_secrets_dhe, tls13_application_secrets, tls13_traffic_keys, tls13_seal, tls13_open, Tls13Error = tls13
 sha256_candidate = sha256
 nibble = (
     byte : u8

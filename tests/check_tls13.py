@@ -43,6 +43,30 @@ early = extract(bytes(32), psk)
 handshake = extract(label(early, 'derived', hashlib.sha256(b'').digest()), bytes(32))
 client = label(handshake, 'c hs traffic', th); server = label(handshake, 's hs traffic', th)
 check('tls13_handshake_secrets(schedule, 128, psk, 32, hash, scratch, 4096)', 'schedule', early + handshake + client + server)
+# The public additive DHE helper must retain PSK-only compatibility and bind
+# all 32 shared-secret bytes into HKDF extraction. Expected 128-byte schedules
+# come from Python hashlib/hmac, independently of the Zen implementation.
+for shared_input in [bytes(32), bytes(range(32)), bytes([255]) * 32,
+                     bytes.fromhex('4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742')]:
+    load('secret', shared_input)
+    hs_dhe = extract(label(early, 'derived', hashlib.sha256(b'').digest()), shared_input)
+    expected_dhe = early + hs_dhe + label(hs_dhe, 'c hs traffic', th) + label(hs_dhe, 's hs traffic', th)
+    check('tls13_handshake_secrets_dhe(schedule, 128, psk, 32, secret, hash, scratch, 4096)', 'schedule', expected_dhe)
+for call in [
+    'tls13_handshake_secrets_dhe(schedule, 128, psk, 32, null_ptr<u8>(), hash, scratch, 4096)',
+    'tls13_handshake_secrets_dhe(schedule, 127, psk, 32, secret, hash, scratch, 4096)',
+    'tls13_handshake_secrets_dhe(schedule, 128, psk, 32, secret, hash, scratch, 4095)',
+    'tls13_handshake_secrets_dhe(null_ptr<u8>(), 128, psk, 32, secret, hash, scratch, 4096)',
+    'tls13_handshake_secrets_dhe(schedule, 128, null_ptr<u8>(), 32, secret, hash, scratch, 4096)',
+    'tls13_handshake_secrets_dhe(schedule, 128, psk, 0, secret, hash, scratch, 4096)',
+    'tls13_handshake_secrets_dhe(schedule, 128, psk, 32, secret, null_ptr<u8>(), scratch, 4096)',
+    'tls13_handshake_secrets_dhe(schedule, 128, psk, 32, secret, hash, null_ptr<u64>(), 4096)',
+]:
+    lines.append('    Range(0, 128).loop((i) { schedule.write(i, 165); });')
+    lines.append(f'    good = !{call} && good;')
+    lines.append('    Range(0, 128).loop((i) { good = schedule.read(i) == 165 && good; });')
+# Restore the original zero-DHE schedule used by the existing tests below.
+check('tls13_handshake_secrets(schedule, 128, psk, 32, hash, scratch, 4096)', 'schedule', early + handshake + client + server)
 check('tls13_binder(output, 64, psk, 32, hash, scratch, 4096)', 'output', finished(label(early, 'ext binder', hashlib.sha256(b'').digest()), th))
 check('tls13_finished(output, 64, schedule.offset(64), hash, scratch, 4096)', 'output', finished(client, th))
 master = extract(label(handshake, 'derived', hashlib.sha256(b'').digest()), bytes(32))
@@ -79,6 +103,22 @@ for index,inner in enumerate([b'hello\x17'+bytes(64), b'\x17'+bytes(8), bytes(32
     lines.append('    Range(0, 64).loop((i) { expected.write(i, 165); });')
     lines.append(f'    good = tls13_open(expected, 17000, output, {len(record)}, key, iv, 0, scratch, 4096).match({{Ok(_) => false, Err(_) => true}}) && good;')
     lines.append('    Range(0, 64).loop((i) { good = expected.read(i) == 165 && good; });')
+# RFC8446 section5.4 includes padding in the 2^14+1 inner-plaintext limit.
+# Both records authenticate correctly and contain only five content bytes.
+for inner_size in (16385, 16386):
+    inner = b'hello\x17' + bytes(inner_size - 6)
+    header = b'\x17\x03\x03' + (len(inner) + 16).to_bytes(2, 'big')
+    record = header + ChaCha20Poly1305(key).encrypt(iv, inner, header)
+    load('output', record)
+    lines.append('    Range(0, 64).loop((i) { expected.write(i, 165); });')
+    call = f'tls13_open(expected, 64, output, {len(record)}, key, iv, 0, scratch, 4096)'
+    if inner_size == 16385:
+        lines.append(f'    maximum_padding = {call}.try();')
+        lines.append('    good = maximum_padding.count == 5 && maximum_padding.kind == 23 && good;')
+        lines.append('    good = same(expected, "68656c6c6f") && good;')
+    else:
+        lines.append(f'    good = {call}.match({{Ok(_) => false, Err(_) => true}}) && good;')
+        lines.append('    Range(0, 64).loop((i) { good = expected.read(i) == 165 && good; });')
 # Corrupt every byte of a small record; output must stay unchanged.
 inner=b'hello\x17';header=b'\x17\x03\x03'+(len(inner)+16).to_bytes(2,'big');record=header+ChaCha20Poly1305(key).encrypt(iv,inner,header);load('output',record)
 lines += [f'    Range(0, {len(record)}).loop((i) {{', '        old = output.read(i); output.write(i, old +% 1);', '        Range(0, 64).loop((j) { expected.write(j, 165); });', f'        good = tls13_open(expected, 64, output, {len(record)}, key, iv, 0, scratch, 4096).match({{Ok(_) => false, Err(_) => true}}) && good;', '        Range(0, 64).loop((j) { good = expected.read(j) == 165 && good; });', '        output.write(i, old);', '    });']
@@ -89,7 +129,7 @@ source=(ROOT/'tests/tls13_test.zen').read_text().replace('    // VECTORS','\n'.j
 subprocess.run([str(a.zen.resolve()),'build',str(stage),'--std',str(a.std.resolve()),'--emit-c','-o',str(work/'test.c')],check=True)
 subprocess.run([os.getenv('CC','clang'),'-O2','-fsanitize=undefined','-fno-sanitize-recover=all',str(work/'test.c'),'-o',str(work/'test')],check=True)
 subprocess.run([str(work/'test')],check=True)
-print('PASS independent schedule + 12 ChaCha20 record vectors, padding and tampering; no external crypto linked')
+print('PASS independent PSK/DHE schedules (4 DHE vectors, 8 invalid cases) + 12 ChaCha20 record vectors, padding boundaries and tampering; no external crypto linked')
 
 symbols = subprocess.run(['nm','-u',str(work/'test')],check=True,capture_output=True,text=True).stdout
 (work/'undefined-symbols.txt').write_text(symbols)

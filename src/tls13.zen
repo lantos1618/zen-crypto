@@ -199,13 +199,61 @@ tls13_handshake_secrets* = (
     scratch         : Ptr<u64>,
     words           : usize
 ) bool {
+    handshake_secrets(
+        out,
+        capacity,
+        psk,
+        psk_count,
+        null_ptr<u8>(),
+        transcript_hash,
+        scratch,
+        words
+    )
+}
+// psk_dhe_ke with a validated 32-byte X25519 shared secret. The shared secret
+// is a fixed readable span, disjoint from output/scratch like other inputs.
+// Peer-key validation and all-zero rejection belong to the X25519 caller.
+tls13_handshake_secrets_dhe* = (
+    out             : Ptr<u8>,
+    capacity        : usize,
+    psk             : Ptr<u8>,
+    psk_count       : usize,
+    shared_secret   : Ptr<u8>,
+    transcript_hash : Ptr<u8>,
+    scratch         : Ptr<u64>,
+    words           : usize
+) bool {
+    !shared_secret.is_null() && handshake_secrets(
+        out,
+        capacity,
+        psk,
+        psk_count,
+        shared_secret,
+        transcript_hash,
+        scratch,
+        words
+    )
+}
+handshake_secrets = (
+    out             : Ptr<u8>,
+    capacity        : usize,
+    psk             : Ptr<u8>,
+    psk_count       : usize,
+    shared_secret   : Ptr<u8>,
+    transcript_hash : Ptr<u8>,
+    scratch         : Ptr<u64>,
+    words           : usize
+) bool {
     valid = workspace(
         scratch,
         words
     ) && !out.is_null() && capacity >= 128 && !psk.is_null() && psk_count > 0 && !transcript_hash.is_null();
     valid.match({false => false, true => {
         p = scratch.to<u8>(); Range(0, 32).loop((i) { p.write(256 + i, 0); });
-        good = extract(p, p.offset(256), psk, psk_count, scratch) && empty_hash(scratch) &&
+        input = shared_secret.is_null().match({true => p.offset(
+            256
+        ), false => shared_secret});
+        good  = extract(p, p.offset(256), psk, psk_count, scratch) && empty_hash(scratch) &&
             tls13_derive_secret(
                 p.offset(160),
                 32,
@@ -215,7 +263,7 @@ tls13_handshake_secrets* = (
                 scratch,
                 words
             ) &&
-            extract(p.offset(32), p.offset(160), p.offset(256), 32, scratch) &&
+            extract(p.offset(32), p.offset(160), input, 32, scratch) &&
             tls13_derive_secret(
                 p.offset(64),
                 32,
@@ -365,6 +413,10 @@ tls13_open* = (
     (record.read(0) == 23 && record.read(1) == 3 && record.read(2) == 3 && record.read(3).to_usize() * 256 + record.read(4).to_usize() == count - 5).ensure(Tls13Error.Invalid).try();
     p = scratch.to<u8>(); iv_nonce = p.offset(16648); nonce(iv_nonce, iv, sequence);
     chacha20poly1305_open(p, 16640, record.offset(5), count - 5, record, 5, key, iv_nonce, scratch.offset(2083), 40).ensure(Tls13Error.Authentication).try();
+    // RFC 8446 section 5.4 bounds the full inner plaintext, including its
+    // content type and padding, not only the content exposed to the caller.
+    // Authentication completes in scratch before any caller output is touched.
+    (count - 21 <= 16385).ensure(Tls13Error.Invalid).try();
     end ::= count - 21;
     loop(() { end > 0 && p.read(end - 1) == 0 }, (h) { end = end - 1; });
     (end > 0).ensure(Tls13Error.Invalid).try(); kind = p.read(end - 1); content = end - 1;

@@ -1,5 +1,5 @@
 // Experimental external-PSK TLS 1.3 one-round-trip profile. Cipher 0x1303,
-// psk_ke only: no certificates, (EC)DHE, HRR, early data or session tickets.
+// Explicit psk_ke or X25519 psk_dhe_ke; no certificates, HRR, early data or tickets.
 // The caller owns the connected socket, configures I/O deadlines, and supplies
 // fresh cryptographically random 32 bytes for each handshake. Blocking I/O.
 // connect returns a reusable authenticated session; round_trip is a compatibility helper.
@@ -7,7 +7,8 @@ Alloc, AllocError, Ptr, null_ptr = std.mem
 SocketFd = std.net.socket
 ByteReader, ByteWriter, ByteError = std.bytes
 sha256_candidate = sha256
-tls13_binder, tls13_handshake_secrets, tls13_application_secrets, tls13_traffic_keys, tls13_finished, tls13_seal, tls13_open = tls13
+x25519_public_key, x25519_shared_secret = x25519
+tls13_binder, tls13_handshake_secrets, tls13_handshake_secrets_dhe, tls13_application_secrets, tls13_traffic_keys, tls13_finished, tls13_seal, tls13_open = tls13
 Tls13ClientError*, Tls13Session* = tls13_session
 read_exact = (
     socket : SocketFd,
@@ -70,7 +71,7 @@ equal32 = (left: Ptr<u8>, right: Ptr<u8>) bool {
     Range(0, 32).loop((i) { differences = differences + (left.read(i) == right.read(i)).match({true => 0, false => 1}); });
     differences == 0
 }
-server_hello = (message: Ptr<u8>, count: usize) Res<(), Tls13ClientError
+server_hello = (message: Ptr<u8>, count: usize, dhe: bool, peer_public: Ptr<u8>) Res<(), Tls13ClientError
     | ByteError> {
     reader ::= ByteReader.open(message, count).try();
     (reader.read_be(1).try() == 2 && reader.read_be(3).try() == (count - 4).to_u64() && reader.read_be(2).try() == 771).ensure(Tls13ClientError.Protocol).try();
@@ -87,24 +88,80 @@ server_hello = (message: Ptr<u8>, count: usize) Res<(), Tls13ClientError
     (reader.read_be(1).try() == 0 && reader.read_be(2).try() == 4867 && reader.read_be(1).try() == 0).ensure(Tls13ClientError.Protocol).try();
     ext_count = reader.read_be(2).try().to_usize().ok_or(Tls13ClientError.Limit).try();
     (ext_count == reader.remaining()).ensure(Tls13ClientError.Protocol).try();
-    version ::= false; selected ::= false;
+    version ::= false; selected ::= false; shared ::= false;
     loop(() { reader.remaining() > 0 }, (h) {
         kind = reader.read_be(2).try(); length = reader.read_be(2).try();
-        (length == 2).ensure(Tls13ClientError.Protocol).try(); value = reader.read_be(2).try();
         kind.match({
-            43 => { (!version && value == 772).ensure(
-                Tls13ClientError.Protocol
-            ).try(); version = true; },
-            41 => { (!selected && value == 0).ensure(
-                Tls13ClientError.Protocol
-            ).try(); selected = true; },
+            43 => {
+                (!version && length == 2).ensure(
+                    Tls13ClientError.Protocol
+                ).try();
+                (reader.read_be(2).try() == 772).ensure(Tls13ClientError.Protocol).try(); version = true;
+            },
+            41 => {
+                (!selected && length == 2).ensure(
+                    Tls13ClientError.Protocol
+                ).try();
+                (reader.read_be(2).try() == 0).ensure(Tls13ClientError.Protocol).try(); selected = true;
+            },
+            51 => {
+                (dhe && !shared && length == 36).ensure(
+                    Tls13ClientError.Protocol
+                ).try();
+                (reader.read_be(2).try() == 29 && reader.read_be(2).try() == 32).ensure(Tls13ClientError.Protocol).try();
+                key = reader.take(32).try(); peer_public.copy_from(key.ptr(), 32); shared = true;
+            },
             _  => Err(Tls13ClientError.Protocol).try(),
         });
     });
-    (version && selected).ensure(Tls13ClientError.Protocol)
+    (version && selected && shared == dhe).ensure(Tls13ClientError.Protocol)
 }
+
 tls13_psk_connect* = (a: Alloc, socket: SocketFd, identity: str, psk: Ptr<u8>, psk_count: usize, random: Ptr<u8>) Res<Tls13Session, Tls13ClientError
     | AllocError> {
+    connect(a, socket, identity, psk, psk_count, random, null_ptr<u8>(), false)
+}
+// Explicit X25519 psk_dhe_ke with no PSK-only fallback. Caller supplies fresh
+// OS-CSPRNG private bytes, generated independently of the public ClientHello
+// random, for each connection; the caller owns/erases that input. Reusing random
+// as the private key publishes the secret. Equality rejection is only a guard,
+// not validation of entropy or independence.
+// Private input is borrowed unchanged; our copy/intermediates are wiped using
+// ordinary stores on success/failure, without a guaranteed erasure barrier.
+tls13_psk_dhe_connect* = (
+    a                 : Alloc,
+    socket            : SocketFd,
+    identity          : str,
+    psk               : Ptr<u8>,
+    psk_count         : usize,
+    random            : Ptr<u8>,
+    ephemeral_private : Ptr<u8>
+) Res<Tls13Session, Tls13ClientError | AllocError> {
+    (!ephemeral_private.is_null() && !random.is_null()).ensure(
+        Tls13ClientError.Invalid
+    ).try();
+    (!equal32(random, ephemeral_private)).ensure(Tls13ClientError.Invalid).try();
+    connect(
+        a,
+        socket,
+        identity,
+        psk,
+        psk_count,
+        random,
+        ephemeral_private,
+        true
+    )
+}
+connect = (
+    a                 : Alloc,
+    socket            : SocketFd,
+    identity          : str,
+    psk               : Ptr<u8>,
+    psk_count         : usize,
+    random            : Ptr<u8>,
+    ephemeral_private : Ptr<u8>,
+    dhe               : bool
+) Res<Tls13Session, Tls13ClientError | AllocError> {
     (!psk.is_null() && psk_count > 0 && !random.is_null() && identity.len > 0 && identity.len <= 255).ensure(
         Tls13ClientError.Invalid
     ).try();
@@ -119,6 +176,8 @@ tls13_psk_connect* = (a: Alloc, socket: SocketFd, identity: str, psk: Ptr<u8>, p
         psk,
         psk_count,
         random,
+        ephemeral_private,
+        dhe,
         memory,
         scratch_bytes
     ).match({
@@ -131,19 +190,29 @@ tls13_psk_connect* = (a: Alloc, socket: SocketFd, identity: str, psk: Ptr<u8>, p
     })
 }
 handshake = (
-    a             : Alloc,
-    socket        : SocketFd,
-    identity      : str,
-    psk           : Ptr<u8>,
-    psk_count     : usize,
-    random        : Ptr<u8>,
-    memory        : Ptr<u8>,
-    scratch_bytes : Ptr<u8>
+    a                 : Alloc,
+    socket            : SocketFd,
+    identity          : str,
+    psk               : Ptr<u8>,
+    psk_count         : usize,
+    random            : Ptr<u8>,
+    ephemeral_private : Ptr<u8>,
+    dhe               : bool,
+    memory            : Ptr<u8>,
+    scratch_bytes     : Ptr<u8>
 ) Res<Tls13Session, Tls13ClientError> {
     scratch = scratch_bytes.to<u64>();
     record  = memory; plain = memory.offset(17000); pending = memory.offset(34000); transcript = memory.offset(100000);
     schedule = memory.offset(166000); app = memory.offset(166200); keys = memory.offset(166400); digest = memory.offset(166600); verify = memory.offset(166700); hash_work = memory.offset(167000); hash_words = memory.offset(167104).to<u32>();
-    ch_count = 107 + identity.len;
+    private_key = memory.offset(168000); public_key = memory.offset(168032);
+    peer_public = memory.offset(168064); shared_secret = memory.offset(168096);
+    dhe.then(() {
+        private_key.copy_from(ephemeral_private, 32);
+        x25519_public_key(public_key, 32, private_key, scratch, 4096).ensure(Tls13ClientError.Invalid).try();
+        Range(0, 32768).loop((i) { scratch_bytes.write(i, 0); });
+    });
+    extra: usize = dhe.match({true => 50, false => 0});
+    ch_count     = 107 + identity.len + extra;
     writer ::= ByteWriter.open(
         transcript,
         ch_count
@@ -154,11 +223,20 @@ handshake = (
     writer.write_be(0, 1).try(Tls13ClientError.Invalid); writer.write_be(2, 2).try(Tls13ClientError.Invalid); writer.write_be(4867, 2).try(Tls13ClientError.Invalid);
     writer.write_be(1, 1).try(Tls13ClientError.Invalid); writer.write_be(0, 1).try(Tls13ClientError.Invalid);
     writer.write_be(
-        (60 + identity.len).to_u64(),
+        (60 + identity.len + extra).to_u64(),
         2
     ).try(Tls13ClientError.Invalid);
     writer.write_be(43, 2).try(Tls13ClientError.Invalid); writer.write_be(3, 2).try(Tls13ClientError.Invalid); writer.write_be(2, 1).try(Tls13ClientError.Invalid); writer.write_be(772, 2).try(Tls13ClientError.Invalid);
-    writer.write_be(45, 2).try(Tls13ClientError.Invalid); writer.write_be(2, 2).try(Tls13ClientError.Invalid); writer.write_be(1, 1).try(Tls13ClientError.Invalid); writer.write_be(0, 1).try(Tls13ClientError.Invalid);
+    writer.write_be(45, 2).try(Tls13ClientError.Invalid); writer.write_be(2, 2).try(Tls13ClientError.Invalid); writer.write_be(1, 1).try(Tls13ClientError.Invalid); writer.write_be(dhe.match({true => 1, false => 0}), 1).try(Tls13ClientError.Invalid);
+    dhe.then(() {
+        writer.write_be(10, 2).try(Tls13ClientError.Invalid); writer.write_be(4, 2).try(Tls13ClientError.Invalid);
+        writer.write_be(2, 2).try(Tls13ClientError.Invalid); writer.write_be(29, 2).try(Tls13ClientError.Invalid);
+        writer.write_be(51, 2).try(Tls13ClientError.Invalid); writer.write_be(38, 2).try(Tls13ClientError.Invalid);
+        writer.write_be(36, 2).try(Tls13ClientError.Invalid); writer.write_be(29, 2).try(Tls13ClientError.Invalid); writer.write_be(32, 2).try(Tls13ClientError.Invalid);
+        Range(0, 32).loop((i) { writer.write_be(public_key.read(i).to_u64(), 1).try(Tls13ClientError.Invalid); });
+    });
+    // pre_shared_key must be last. Binder hashes this prefix with final lengths,
+    // including the DHE mode, supported group and ephemeral public key.
     writer.write_be(41, 2).try(Tls13ClientError.Invalid); writer.write_be((43 + identity.len).to_u64(), 2).try(Tls13ClientError.Invalid);
     writer.write_be((6 + identity.len).to_u64(), 2).try(Tls13ClientError.Invalid); writer.write_be(identity.len.to_u64(), 2).try(Tls13ClientError.Invalid);
     Range(0, identity.len).loop((i) { writer.write_be(identity.ptr().read(i).to_u64(), 1).try(Tls13ClientError.Invalid); });
@@ -190,7 +268,12 @@ handshake = (
                 (pending_count == total).ensure(
                     Tls13ClientError.Protocol
                 ).try();
-                server_hello(pending, total).try(Tls13ClientError.Protocol);
+                server_hello(
+                    pending,
+                    total,
+                    dhe,
+                    peer_public
+                ).try(Tls13ClientError.Protocol);
                 transcript_count = append(
                     transcript,
                     transcript_count,
@@ -201,7 +284,18 @@ handshake = (
         });
     });
     hash(digest, transcript, transcript_count, hash_work, hash_words).try();
-    tls13_handshake_secrets(schedule, 128, psk, psk_count, digest, scratch, 4096).ensure(Tls13ClientError.Invalid).try();
+    dhe.match({
+        true  => {
+            x25519_shared_secret(shared_secret, 32, private_key, peer_public, scratch, 4096).ensure(Tls13ClientError.Authentication).try();
+            Range(0, 32).loop((i) { private_key.write(i, 0); });
+            // Clear X25519's scalar/field intermediates before reusing scratch.
+            Range(0, 32768).loop((i) { scratch_bytes.write(i, 0); });
+            tls13_handshake_secrets_dhe(schedule, 128, psk, psk_count, shared_secret, digest, scratch, 4096).ensure(Tls13ClientError.Invalid).try();
+            Range(0, 32).loop((i) { shared_secret.write(i, 0); });
+            Range(0, 32768).loop((i) { scratch_bytes.write(i, 0); });
+        },
+        false => tls13_handshake_secrets(schedule, 128, psk, psk_count, digest, scratch, 4096).ensure(Tls13ClientError.Invalid).try(),
+    });
     tls13_traffic_keys(keys, 44, schedule.offset(96), scratch, 4096).ensure(Tls13ClientError.Invalid).try();
     stage ::= 0; sequence: u64 ::= 0;
     loop(() { stage < 2 }, (h) {
