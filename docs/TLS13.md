@@ -4,6 +4,7 @@ The native implementation uses Zen SHA-256, HMAC/HKDF and IETF
 ChaCha20-Poly1305. `src/tls13.zen` provides the key schedule and record layer;
 `src/tls13_client.zen` provides a bounded external-PSK handshake and
 `src/tls13_session.zen` supplies reusable blocking record I/O.
+`src/tls13_server.zen` supplies the external-PSK X25519 server handshake.
 There are no OpenSSL or libsodium runtime calls in these modules. Zen still
 uses its C compiler backend and standard OS socket/allocation adapters.
 
@@ -71,8 +72,7 @@ and the matching allocator. Arbitrary caller buffers are outside its contract.
   session. A record need not contain a complete application message.
 
 Certificate validation, HelloRetryRequest, session resumption,
-early data, post-handshake authentication, KeyUpdate and a native TLS server
-are outside this profile. EncryptedExtensions must be empty, so ALPN is not
+early data, post-handshake authentication and KeyUpdate are outside this profile. EncryptedExtensions must be empty, so ALPN is not
 negotiated. Tickets and other post-handshake messages are rejected. The client
 supports authenticated close_notify as described above; the caller closes the socket.
 No HTTP/2 or HTTP/1 performance claim follows from
@@ -193,7 +193,7 @@ altered encrypted handshake records; rejected handshakes must emit no client
 Finished or application data and leave caller output unchanged. Tests also
 check that private input remains unchanged and aligned allocations are released.
 Python cryptography and OpenSSL are test references only. These checks do not
-add PKI, HRR, ALPN, HTTP/2 negotiation or a native TLS server.
+add PKI, HRR, ALPN or HTTP/2 negotiation.
 
 On macOS arm64, the combined `scripts/check-tls13.sh` suite passes with the
 PSK-DHE addition and the authenticated inner-plaintext length check. This includes
@@ -206,3 +206,42 @@ passes all nine independent peer cases and both OpenSSL cases; sanitizer
 activation was confirmed from executable symbols.
 [Exact revisions, commands and limitations](../tests/validation/tls13-dhe-linux-2026-09-29.txt)
 distinguish the full UBSan suites from the DHE-only ASan experiment.
+
+## Native server role
+
+`tls13_psk_dhe_accept(alloc, socket, identity, psk, psk_count, random,
+private_key)` authenticates a connected peer using one configured external PSK
+identity and X25519, then returns the same `Tls13Session`. The caller supplies
+and owns the already connected socket; this function does not bind, listen,
+accept TCP connections, or configure deadlines. It accepts only PSK-DHE with
+`TLS_CHACHA20_POLY1305_SHA256`; it does not negotiate PSK-only fallback.
+
+The server verifies the ClientHello binder and acceptable key share before
+sending its flight, and verifies the client Finished before returning a session.
+It requires a unique PSK-last extension and refuses duplicate extensions,
+early data, cookies, malformed shares and incompatible offers. Public
+ClientHello-compatible random bytes and the secret private key must be generated
+independently by an OS CSPRNG; the same input and disposal rules as the client
+apply. Session/socket/allocator ownership and shutdown rules are unchanged.
+The server echoes the bounded legacy session ID but does not resume sessions.
+
+`scripts/check-tls13-server.py` exercises an independent Python client,
+OpenSSL `s_client` requiring X25519, and the native Zen client. The fixture
+opens TCP to a harness and then takes the TLS server role; the OpenSSL/native
+pair paths use a byte-only TCP relay. This validates the TLS handshake and record
+protocol, not a Zen listener API. Successful peers receive 50000 bytes over four
+application records and authenticate close_notify. Negative peers exercise bad
+binders/identities, malformed or low-order shares, duplicate and misplaced
+extensions, unsupported modes, early data, wrong client Finished, replay, and
+truncation. No application data may be sent before client authentication.
+All cryptographic computation in the native endpoints is Zen; Python cryptography
+and OpenSSL are independent test references. This remains a narrow external-PSK
+server profile without PKI, hostname validation, ALPN, HRR or HTTP/2 negotiation.
+
+On macOS arm64, the complete TLS suite passes with the native server module.
+The final expanded server runner separately passes 22 independent client cases,
+OpenSSL `s_client`, and the native-to-native path under UBSan. The additional
+cases cover application data before Finished, duplicate ignored extensions,
+share/group ordering, cookies, PSK-last placement, and parser size limits.
+Linux server validation remains pending; the earlier Linux evidence above
+covers the client/session implementations.
