@@ -1,0 +1,102 @@
+Native PSK-DHE TLS 1.3 Linux validation, 2026-09-29
+
+Published sources
+  zen-crypto: b1bd12316caef8418389a90480844372437ab5a2
+    https://github.com/lantos1618/zen-crypto/commit/b1bd12316caef8418389a90480844372437ab5a2
+  Initial compiler/std: 6494242457685b3bf0ada430edc812414fe0bc22
+  Fresh merged main compiler/std: f506c9cbf22cf1c2367f5be78d642aac27c81e92
+    https://github.com/lantos1618/zen/commit/f506c9cbf22cf1c2367f5be78d642aac27c81e92
+  All source updates used public fetch + merge --ff-only FETCH_HEAD after
+  checking that the isolated source checkout was clean. No ~/zenc changes.
+
+Environment
+  /home/ubuntu/zen-native-crypto-validation-20260928
+  Linux 6.8.0-139-generic x86_64, Ubuntu Clang 18.1.3 (1ubuntu1)
+  Python 3.12.3, cryptography 41.0.7 (independent peer only)
+  OpenSSL 3.5.4 (30 Sep 2025), test reference server only
+
+Full suite with initial compiler/std, from zen-crypto
+  ZEN_COMPILER=../zen/build/bootstrap/zen-seed \
+  ZEN_STD=../zen/src PYTHON=python3 CC=clang \
+  OPENSSL=/home/ubuntu/zen-http-validation-20260928-1952/zen-http/build/openssl/bin/openssl \
+  scripts/check-tls13.sh
+  Exit status: 0
+
+Condensed outcomes
+  PASS independent PSK/DHE schedules (4 DHE vectors, 8 invalid cases)
+  PASS 12 ChaCha20 record vectors, authenticated padding boundaries, tampering
+  PASS wrong TLS label negative control and no external crypto symbols
+  PASS legacy PSK OpenSSL exchange, wrong PSK, fragmented and hostile peers
+  PASS deliberate allocation-alignment regression rejected by UBSan
+  PASS 11 session reference cases and 100 OpenSSL streaming exchanges
+  PASS independent PSK-DHE valid
+  PASS independent PSK-DHE wrong-group
+  PASS independent PSK-DHE missing-share
+  PASS independent PSK-DHE duplicate-share
+  PASS independent PSK-DHE short-share
+  PASS independent PSK-DHE low-order-zero
+  PASS independent PSK-DHE low-order-one
+  PASS independent PSK-DHE forged-finished
+  PASS independent PSK-DHE tampered-record
+  PASS OpenSSL required-DHE authenticated exchange
+  PASS OpenSSL required-DHE wrong PSK rejected
+  PASS native-only symbols, fresh private input unchanged, aligned cleanup
+
+Additional DHE ASan + UBSan run, using initial compiler/std
+  Ignored compiler wrapper tls-session-asan-cc:
+    #!/bin/sh
+    exec clang -fsanitize=address "$@"
+  The runner also passes -fsanitize=undefined -fno-sanitize-recover=all.
+
+  ZEN_COMPILER=../zen/build/bootstrap/zen-seed \
+  ZEN_STD=../zen/src \
+  CC=/home/ubuntu/zen-native-crypto-validation-20260928/tls-session-asan-cc \
+  OPENSSL=/home/ubuntu/zen-http-validation-20260928-1952/zen-http/build/openssl/bin/openssl \
+  python3 scripts/check-tls13-dhe.py
+  Exit status: 0
+  All nine independent peer cases and both required-DHE OpenSSL cases passed.
+  The final DHE executable included __asan_init and
+  __ubsan_handle_type_mismatch_v1_abort; no sanitizer failure was reported.
+  The runner's fixed summary says UBSan; ASan was verified from symbols.
+
+Fresh public compiler installation check
+  After the sanitizer run, the clean isolated compiler was fast-forwarded to
+  f506c9cbf22cf1c2367f5be78d642aac27c81e92 (merged public main).
+  From the isolated root:
+    clang -O2 -std=c99 -Wno-parentheses-equality zen/seed/zen.c \
+      -o zen/build/bootstrap/zen-seed
+    cp zen/build/bootstrap/zen-seed zen/zen
+  The full-suite command above was then repeated with this rebuilt compiler
+  and its matching std, keeping crypto at the same published b1bd123 revision.
+  Rebuilt compiler SHA-256:
+    a7ff87fdb092ca8f3baf6ed220960e89e037882d0a067ab145b0f4f332854986
+  Exit status: 0; all full-suite outcomes listed above passed again.
+
+DHE-specific guarantees exercised
+  Independent peer parses the ClientHello extension vectors, requires only
+  psk_dhe_ke and X25519, and verifies PSK-last placement and the PSK binder.
+  Python X25519 independently derives the shared secret; HMAC/HKDF derives
+  traffic secrets and verifies the client's Finished and application record.
+  The rejected ServerHello/handshake cases emit no client Finished or
+  application data and leave caller output unchanged.
+  Null private input and private bytes equal to public ClientHello random
+  (same pointer or distinct buffers) are refused before allocation or I/O.
+  Private inputs are separate OS-CSPRNG samples and remain unchanged.
+  OpenSSL runs with -groups X25519 and without -allow_no_dhe_kex.
+  Two aligned allocations are released exactly once in each peer case.
+
+Retained logs at the isolated root
+  tls-dhe-environment.txt, tls-dhe-full.log, tls-dhe-full.exit
+  tls-dhe-asan.log, tls-dhe-asan.exit, tls-dhe-sanitizer-proof.txt
+  tls-dhe-main-fetch.log, tls-dhe-main-bootstrap.log
+  tls-dhe-main-provenance.txt, tls-dhe-main-full.log, tls-dhe-main-full.exit
+
+Limits
+  External PSK authenticates these peers; no certificates or hostname checks.
+  No HRR, ALPN, session tickets, KeyUpdate, native TLS server or HTTP/2 claim.
+  Sanitizer checks are not a security audit, constant-time proof or guaranteed
+  secure-erasure test. Caller entropy quality is not verified by the API.
+  ASan+UBSan was run for the DHE integration runner using compiler 64942424;
+  the final merged-compiler full suite used UBSan. This distinction is retained
+  rather than implying every test ran under every sanitizer/compiler pair.
+  No full compiler aggregate or performance result is inferred from TLS tests.

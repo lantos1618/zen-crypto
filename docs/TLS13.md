@@ -101,8 +101,10 @@ supply handshake state or session ownership.
 
 ## Reproducible checks
 
-Build matching compiler and std from [Zen PR #8](https://github.com/lantos1618/zen/pull/8),
-commit `64942424` (`native-tls-bits`).
+Build matching compiler and std from public Zen main,
+commit [`f506c9cb`](https://github.com/lantos1618/zen/commit/f506c9cbf22cf1c2367f5be78d642aac27c81e92)
+or a compatible later revision. The native TLS primitives and formatter
+changes are merged upstream.
 The generic u32/u64 operations and borrowed endian cursors are upstream std
 work; TLS-specific state remains here.
 
@@ -197,5 +199,10 @@ On macOS arm64, the combined `scripts/check-tls13.sh` suite passes with the
 PSK-DHE addition and the authenticated inner-plaintext length check. This includes
 the PSK-only session regressions, nine independent DHE peer cases, OpenSSL
 required-DHE success and wrong-PSK rejection, and allocation/input validation.
-Linux session evidence above predates PSK-DHE; no Linux DHE result is claimed
-until the published revision is tested there.
+Linux PSK-DHE validation at public crypto `b1bd123` also passes the full TLS
+suite, first against compiler `64942424` and then against a freshly built
+merged public compiler/std `f506c9cb`. A separate DHE run with ASan and UBSan
+passes all nine independent peer cases and both OpenSSL cases; sanitizer
+activation was confirmed from executable symbols.
+[Exact revisions, commands and limitations](../tests/validation/tls13-dhe-linux-2026-09-29.txt)
+distinguish the full UBSan suites from the DHE-only ASan experiment.
