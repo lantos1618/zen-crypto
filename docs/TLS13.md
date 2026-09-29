@@ -10,17 +10,33 @@ uses its C compiler backend and standard OS socket/allocation adapters.
 ## Supported boundary
 
 The client targets TLS 1.3 `TLS_CHACHA20_POLY1305_SHA256` with an external
-pre-shared key and the `psk_ke` mode. Both peers must already have the same
-secret and identity. It verifies the server Finished before sending application
-data. This mode has no forward secrecy and does not authenticate web
-certificates or hostnames. It is a development profile, not a general HTTPS
-client or a replacement for zen-http's current zen-openssl backend.
+pre-shared key. Both peers must already have the same secret and identity.
+It verifies the server Finished before sending application data. The original
+`psk_ke` entry point has no forward secrecy. The separate `psk_dhe_ke` entry
+point mixes a fresh X25519 shared secret into the handshake key schedule; its
+forward-secrecy property depends on fresh private-key entropy and effective
+secret disposal. Neither mode authenticates web certificates or hostnames.
+This is a development profile, not a general HTTPS client or a replacement
+for zen-http's current zen-openssl backend.
 
 `tls13_psk_connect(alloc, socket, identity, psk, psk_count, random)` returns a
 `Tls13Session`. The caller owns the connected std `Socket`, timeout policy,
 allocator backing storage, and PSK/random storage. The socket and allocator must
 outlive the session. Supply 32 fresh bytes from an OS cryptographic random
 source for every handshake; never use `std.core.rand`.
+
+`tls13_psk_dhe_connect(alloc, socket, identity, psk, psk_count, random,
+private_key)` returns the same session API while requiring X25519 and
+`psk_dhe_ke`. It does not fall back to `psk_ke`. Supply a separately generated
+32-byte OS-CSPRNG private key, independent of the public ClientHello random.
+Reusing the ClientHello random as the private key exposes the private key on
+the wire. Null private keys, the same buffer, and byte-identical distinct buffers
+are rejected before allocations or I/O. This equality check does not assess
+entropy quality. X25519 copies and clamps the private input internally; caller
+input remains unchanged. The caller owns and must dispose of its secret copy.
+Server key shares must be unique, exactly 32 bytes, and in the offered X25519
+group; missing shares, unsupported groups, and all-zero shared secrets fail
+before application data. See RFC 8446 sections 4.2.8, 4.2.9, and 7.4.2.
 
 The session owns two explicitly 8-byte-aligned allocations (180000 and 32768
 bytes) and borrows the socket. Keep one owner and serialize operations; do not
@@ -54,7 +70,7 @@ and the matching allocator. Arbitrary caller buffers are outside its contract.
   sends one request record and returns one response record, then releases its
   session. A record need not contain a complete application message.
 
-Certificate validation, X25519 handshake integration, HelloRetryRequest, session resumption,
+Certificate validation, HelloRetryRequest, session resumption,
 early data, post-handshake authentication, KeyUpdate and a native TLS server
 are outside this profile. EncryptedExtensions must be empty, so ALPN is not
 negotiated. Tickets and other post-handshake messages are rejected. The client
@@ -103,6 +119,7 @@ python3 tests/check_tls13.py --zen "$ZEN_COMPILER" --std "$ZEN_STD"
 # OpenSSL 3 reference peer; the native client links no crypto backend.
 OPENSSL=/path/to/openssl python3 scripts/check-tls13-interop.py
 OPENSSL=/path/to/openssl python3 scripts/check-tls13-session.py
+OPENSSL=/path/to/openssl python3 scripts/check-tls13-dhe.py
 ```
 
 Known-answer and independent tests include RFC 4231 HMAC, RFC 5869 HKDF,
@@ -164,3 +181,21 @@ all 11 independent peer cases and 100 OpenSSL exchanges. Instrumentation was
 confirmed from the resulting executable symbols.
 [Exact revisions, commands, coverage and limitations](../tests/validation/tls13-session-linux-2026-09-29.txt)
 record this run; these results do not extend the supported protocol profile.
+
+The PSK-DHE runner uses an OpenSSL server configured for X25519 and TLS 1.3,
+without `-allow_no_dhe_kex`. Its independent Python peer validates the actual
+ClientHello vectors, PSK-last extension order, binder, X25519 shared secret,
+Finished messages and application records. Negative peers cover wrong, missing,
+duplicate and short shares, low-order zero/one shares, forged Finished and
+altered encrypted handshake records; rejected handshakes must emit no client
+Finished or application data and leave caller output unchanged. Tests also
+check that private input remains unchanged and aligned allocations are released.
+Python cryptography and OpenSSL are test references only. These checks do not
+add PKI, HRR, ALPN, HTTP/2 negotiation or a native TLS server.
+
+On macOS arm64, the combined `scripts/check-tls13.sh` suite passes with the
+PSK-DHE addition and the authenticated inner-plaintext length check. This includes
+the PSK-only session regressions, nine independent DHE peer cases, OpenSSL
+required-DHE success and wrong-PSK rejection, and allocation/input validation.
+Linux session evidence above predates PSK-DHE; no Linux DHE result is claimed
+until the published revision is tested there.

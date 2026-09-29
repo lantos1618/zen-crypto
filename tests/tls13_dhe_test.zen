@@ -1,0 +1,117 @@
+Socket, SocketFault = std.net.socket
+tls13_psk_dhe_connect, Tls13ClientError = tls13_client
+AlignmentAlloc = { base: Alloc, byte_requests: Ptr<usize>, word_requests: Ptr<usize>, odd: Ptr<Ptr<u8>>, frees: Ptr<usize> }
+AlignmentAlloc.impl(Alloc, {
+    raw = (self: @Self, count: usize, align: usize) Res<Ptr<u8>, AllocError> {
+        (align >= 8).match({
+            true  => { self.word_requests.write(0, self.word_requests.read(0) + 1); self.base.raw(count, align) },
+            false => {
+                self.byte_requests.write(0, self.byte_requests.read(0) + 1);
+                allocated = self.base.raw(count + 1, 8).try(); self.odd.write(0, allocated.offset(1)); Ok(allocated.offset(1))
+            },
+        })
+    }
+    realloc = <T>(self: @Self, pointer: Ptr<T>, count: usize) Res<Ptr<T>, AllocError> {
+        pointer.is_null().ensure(AllocError.OutOfMemory).try();
+        self.byte_requests.write(0, self.byte_requests.read(0) + 1);
+        allocated = self.base.raw(pointer.bytes(count) + 1, 8).try();
+        self.odd.write(0, allocated.offset(1)); Ok(allocated.offset(1).to<T>())
+    }
+    free = <T>(self: @Self, pointer: Ptr<T>) {
+        self.frees.write(0, self.frees.read(0) + 1);
+        pointer.to<u8>().same(self.odd.read(0)).match({true => self.base.free(pointer.to<u8>().back(1)), false => self.base.free(pointer)});
+    }
+})
+
+main = (env: Env) Res<i32, AllocError | SocketFault> {
+    a      = env.mem.alloc();
+    memory = a.raw(512, 8).try(); @scope.defer(() { a.free(memory); });
+    psk = memory; random = memory.offset(32); private = memory.offset(64); saved = memory.offset(96); output = memory.offset(128);
+    Range(0, 32).loop((i) { psk.write(i, i.to_u8().match({Ok(v) => v, None => 0})); });
+    Range(0, 128).loop((i) { output.write(i, 165); });
+    // RANDOM
+    saved.copy_from(private, 32);
+    counters = a.raw(40, 8).try(); @scope.defer(() { a.free(counters); });
+    byte_requests = counters.to<usize>(); word_requests = byte_requests.offset(1); frees = byte_requests.offset(2); odd = counters.offset(24).to<Ptr<u8>>();
+    byte_requests.write(0, 0); word_requests.write(0, 0); frees.write(0, 0); odd.write(0, null_ptr<u8>());
+    aligned = AlignmentAlloc(
+        base: a,
+        byte_requests: byte_requests,
+        word_requests: word_requests,
+        odd: odd,
+        frees: frees
+    );
+    socket ::= Socket.tcp_connect(a, "127.0.0.1", TEST_PORT).try();
+    missing = tls13_psk_dhe_connect(
+        aligned,
+        socket.handle(),
+        "ZenTest",
+        psk,
+        32,
+        random,
+        null_ptr<u8>()
+    ).match({Ok(_) => false, Err(_) => true});
+    same    = tls13_psk_dhe_connect(
+        aligned,
+        socket.handle(),
+        "ZenTest",
+        psk,
+        32,
+        random,
+        random
+    ).match({Ok(_) => false, Err(_) => true});
+    output.copy_from(random, 32);
+    equal          = tls13_psk_dhe_connect(
+        aligned,
+        socket.handle(),
+        "ZenTest",
+        psk,
+        32,
+        random,
+        output
+    ).match({Ok(_) => false, Err(_) => true});
+    invalid_inputs = missing && same && equal && byte_requests.read(0) == 0 && word_requests.read(0) == 0 && frees.read(0) == 0;
+    Range(0, 128).loop((i) { output.write(i, 165); });
+    good = tls13_psk_dhe_connect(
+        aligned,
+        socket.handle(),
+        "ZenTest",
+        psk,
+        32,
+        random,
+        private
+    ).match({
+        Ok(session_value) => {
+            session ::= consume session_value;
+            request: str = "native zen\n";
+            result       = session.write(request.ptr(), request.len).match({
+                Ok(_)  => session.read(output, 128).match({
+                    Ok(n)  => {
+                        expected: str = "nez evitan\n";
+                        same ::= n == expected.len;
+                        Range(0, n).loop((i) { same = same && output.read(i) == expected.ptr().read(i); }); same && EXPECT_SUCCESS
+                    },
+                    Err(_) => false,
+                }),
+                Err(_) => false,
+            });
+            session.abort(); result
+        },
+        Err(_)            => !EXPECT_SUCCESS,
+    });
+    unchanged ::= true;
+    (!EXPECT_SUCCESS).then(
+        () { Range(0, 128).loop((i) { unchanged = unchanged && output.read(i) == 165; }); }
+    );
+    Range(0, 32).loop((i) { unchanged = unchanged && private.read(i) == saved.read(i); });
+    alignment = byte_requests.read(0) == 0 && word_requests.read(0) == 2 && frees.read(0) == 2;
+    println(
+        "DHE result: {} unchanged buffers: {} allocation: {}",
+        good,
+        unchanged,
+        alignment
+    );
+    socket.close(); Ok(
+        (good && unchanged && alignment && invalid_inputs).match({true => 0, false => 1})
+    )
+}
