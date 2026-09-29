@@ -83,9 +83,10 @@ secret lifecycle management remain unfinished.
 ## Resumable application records
 
 After a successful handshake, the same `Tls13Session` can be driven without
-performing socket I/O. This does not make the handshake resumable: both connect
-and accept still block. Use the byte-fed methods only after the handshake has
-returned, and keep one serialized owner of the session.
+performing socket I/O. The connect/accept convenience functions still block;
+the separate server handshake engine described below can also be driven by a
+reactor. Use session byte-fed methods only after handshake authentication and
+ownership handoff, and keep one serialized owner of the session.
 
 - `queue_record(input, count)` seals one application record, at most 16384
   bytes. An empty record is allowed. It consumes one sending sequence number
@@ -306,3 +307,37 @@ with both ASan and UBSan enabled. Sanitizer symbols were checked in both native
 executables. [Exact revisions, commands, transport boundary and limitations](../tests/validation/tls13-server-linux-2026-09-29.txt)
 record this server-role validation. It does not claim listener or HTTP integration
 coverage beyond these TLS endpoints.
+
+## Resumable server handshake
+
+`Tls13ServerHandshake.open(alloc, socket, identity, psk, psk_count, random,
+private)` constructs the PSK-DHE server engine without socket I/O. Identity and
+PSK remain borrowed and immutable through handoff; random/private bytes are
+copied immediately. The caller supplies independent fresh OS entropy.
+
+`feed` retains fragmented headers/bodies and returns consumed bytes for at
+most one record. Retain every unconsumed suffix. `advance` executes one bounded
+protocol phase and returns `NeedInput`, `NeedOutput`, `Runnable` or
+`Established`. `pending_output`/`acknowledge` preserve each server flight across
+short writes; caller views are invalidated by acknowledgment, advance, failure,
+abort or handoff. Invalid acknowledgments do not change state.
+
+Only `Established` permits `take_session()`. It transfers both allocations into
+one `Tls13Session`, invalidates the handshake owner, and rejects a repeated
+handoff. Do not copy either owning value. Failed authentication and EOF abort
+and release storage; invalid early handoff is nonterminal. `abort` and Drop
+are idempotent and never close the borrowed descriptor. The blocking
+`tls13_psk_dhe_accept` now drives this same engine. Client connect functions
+remain blocking.
+
+The existing 64-record, two-CCS and 65536-byte handshake limits remain. No server
+flight is exposed before binder and key-share validation; no established session
+is exposed before client Finished verification. This remains the external-PSK
+profile above, without certificates or ALPN.
+
+Run `scripts/check-tls13-server-progress.py` for independent Python
+X25519/HKDF/AEAD flight oracles, fragmented/coalesced input, acknowledgment
+retries, authentication barriers, EOF/cancellation and single handoff. Its
+zero-cache pool tracks 58 allocations/frees over 29 handshakes and returns to
+zero owned bytes. A staged Finished-authentication bypass must fail. Real
+nonblocking HTTP integration is tested separately by zen-http.

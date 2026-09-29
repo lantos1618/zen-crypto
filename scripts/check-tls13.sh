@@ -10,3 +10,4 @@ export ZEN_COMPILER="$compiler"
 "${PYTHON:-python3}" scripts/check-tls13-dhe.py
 "${PYTHON:-python3}" scripts/check-tls13-server.py
 "${PYTHON:-python3}" scripts/check-tls13-record-engine.py
+"${PYTHON:-python3}" scripts/check-tls13-server-progress.py

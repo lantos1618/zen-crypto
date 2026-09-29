@@ -1,4 +1,4 @@
-// Experimental blocking external-PSK TLS 1.3 server: X25519, SHA256,
+// Experimental resumable external-PSK TLS 1.3 server: X25519, SHA256,
 // ChaCha20-Poly1305. No certificates, HRR, early data, tickets or ALPN.
 // Borrowed connected socket/deadlines and allocator must outlive the session.
 // Caller supplies fresh, independently generated OS-CSPRNG random/private
@@ -10,45 +10,9 @@ ByteReader, ByteWriter, ByteError = std.bytes
 sha256_candidate = sha256
 x25519_public_key, x25519_shared_secret = x25519
 tls13_binder, tls13_handshake_secrets_dhe, tls13_application_secrets, tls13_traffic_keys, tls13_finished, tls13_seal, tls13_open = tls13
-Tls13ClientError*, Tls13Session* = tls13_session
+Tls13ClientError*, Tls13Session*, Tls13Output = tls13_session
+Drop = std.core
 
-read_exact = (
-    socket : SocketFd,
-    out    : Ptr<u8>,
-    count  : usize
-) Res<(), Tls13ClientError> {
-    at ::= 0;
-    loop(() { at < count }, (h) {
-        n = socket.recv(out.offset(at), count - at).try(Tls13ClientError.Io);
-        (n > 0).ensure(Tls13ClientError.Truncated).try(); at = at + n;
-    }); Ok(())
-}
-write_all = (
-    socket : SocketFd,
-    input  : Ptr<u8>,
-    count  : usize
-) Res<(), Tls13ClientError> {
-    at ::= 0;
-    loop(() { at < count }, (h) {
-        n = socket.send(
-            input.offset(at),
-            count - at,
-            0
-        ).try(Tls13ClientError.Io);
-        (n > 0).ensure(Tls13ClientError.Io).try(); at = at + n;
-    }); Ok(())
-}
-read_record = (
-    socket  : SocketFd,
-    out     : Ptr<u8>,
-    initial : bool
-) Res<usize, Tls13ClientError> {
-    read_exact(socket, out, 5).try();
-    (out.read(1) == 3 && (out.read(2) == 3 || (initial && out.read(2) == 1))).ensure(Tls13ClientError.Protocol).try();
-    count = out.read(3).to_usize() * 256 + out.read(4).to_usize();
-    (count > 0 && count <= 16640 && (out.read(0) != 22 || count <= 16384)).ensure(Tls13ClientError.Limit).try();
-    read_exact(socket, out.offset(5), count).try(); Ok(count + 5)
-}
 append = (
     out   : Ptr<u8>,
     at    : usize,
@@ -211,198 +175,398 @@ client_hello = (message: Ptr<u8>, count: usize, identity: str, memory: Ptr<u8>) 
     Ok(Hello(session: session, binder: binder, binder_at: binder_at))
 }
 
-tls13_psk_dhe_accept* = (
-    a                 : Alloc,
-    socket            : SocketFd,
-    identity          : str,
-    psk               : Ptr<u8>,
-    psk_count         : usize,
-    random            : Ptr<u8>,
-    ephemeral_private : Ptr<u8>
-) Res<Tls13Session, Tls13ClientError | AllocError> {
-    (!psk.is_null() && psk_count > 0 && identity.len > 0 && identity.len <= 255 && !random.is_null() && !ephemeral_private.is_null()).ensure(
-        Tls13ClientError.Invalid
-    ).try();
-    (!equal(random, ephemeral_private, 32)).ensure(Tls13ClientError.Invalid).try();
-    memory  = a.raw(180000, 8).try();
-    scratch = a.raw(32768, 8).match({Ok(p) => Ok(p), Err(e) => { a.free(memory); Err(e) }}).try();
-    handshake(
+// The engine borrows immutable identity/PSK until handoff or abort. Random and
+// private bytes are copied at open. The allocator and borrowed socket outlive
+// the transferred session. One owner; no copies, no socket calls in progress.
+Tls13ServerProgress* = NeedInput | NeedOutput | Runnable | Established
+Tls13ServerHandshake* = {
+    alloc: Alloc, socket: SocketFd, identity: str, psk: Ptr<u8>, psk_count: usize,
+    memory :: Ptr<u8>, scratch :: Ptr<u8>, phase :: u8,
+    incoming :: usize, target :: usize, outgoing :: usize, acknowledged :: usize,
+    pending :: usize, transcript_count :: usize, records :: usize,
+    ccs :: usize, sequence :: u64,
+
+    open* = (a: Alloc, socket: SocketFd, identity: str, psk: Ptr<u8>, psk_count: usize, random: Ptr<u8>, private: Ptr<u8>) Res<Tls13ServerHandshake, Tls13ClientError
+        | AllocError> {
+        (!psk.is_null() && psk_count > 0 && identity.len > 0 && identity.len <= 255 && !random.is_null() && !private.is_null()).ensure(
+            Tls13ClientError.Invalid
+        ).try();
+        (!equal(random, private, 32)).ensure(Tls13ClientError.Invalid).try();
+        memory  = a.raw(180000, 8).try();
+        scratch = a.raw(32768, 8).match({Ok(p) => Ok(p), Err(e) => { a.free(memory); Err(e) }}).try();
+        memory.offset(168000).copy_from(private, 32);
+        memory.offset(178192).copy_from(random, 32);
+        Ok(Tls13ServerHandshake(
+            alloc: a,
+            socket: socket,
+            identity: identity,
+            psk: psk,
+            psk_count: psk_count,
+            memory: memory,
+            scratch: scratch,
+            phase: 0,
+            incoming: 0,
+            target: 5,
+            outgoing: 0,
+            acknowledged: 0,
+            pending: 0,
+            transcript_count: 0,
+            records: 0,
+            ccs: 0,
+            sequence: 0
+        ))
+    }
+    abort* = (self :: @Self) {
+        self.phase = 9; self.outgoing = 0; self.acknowledged = 0;
+        (!self.memory.is_null()).then(() {
+            Range(0, 180000).loop((i) { self.memory.write(i, 0); });
+            self.alloc.free(self.memory); self.memory = null_ptr<u8>();
+        });
+        (!self.scratch.is_null()).then(() {
+            Range(0, 32768).loop((i) { self.scratch.write(i, 0); });
+            self.alloc.free(self.scratch); self.scratch = null_ptr<u8>();
+        });
+    }
+    // View is read-only, invalidated by ack, advance, abort, failure or handoff.
+    // Caller buffers must not alias engine storage.
+    pending_output* = (self: @Self) Tls13Output {
+        (self.phase >= 9).match({true => Tls13Output(
+            data: null_ptr<u8>(),
+            count: 0
+        ),
+            false => Tls13Output(
+                data: self.memory.offset(self.acknowledged),
+                count: self.outgoing - self.acknowledged
+            )})
+    }
+    acknowledge* = (self :: @Self, count: usize) Res<(), Tls13ClientError> {
+        (self.phase < 9).ensure(Tls13ClientError.Closed).try();
+        (count <= self.outgoing - self.acknowledged).ensure(
+            Tls13ClientError.Invalid
+        ).try();
+        self.acknowledged = self.acknowledged + count;
+        (self.outgoing > 0 && self.acknowledged == self.outgoing).then(() {
+            self.outgoing = 0; self.acknowledged = 0; self.phase = self.phase + 1;
+        }); Ok(())
+    }
+    header = (self :: @Self) Res<(), Tls13ClientError> {
+        p = self.memory;
+        (p.read(1) == 3 && (p.read(2) == 3 || (self.phase == 0 && p.read(2) == 1))).ensure(Tls13ClientError.Protocol).try();
+        count = p.read(3).to_usize() * 256 + p.read(4).to_usize();
+        (count > 0 && count <= 16640 && (p.read(0) != 22 || count <= 16384)).ensure(Tls13ClientError.Limit).try();
+        self.target = count + 5; Ok(())
+    }
+    feed_inner = (self :: @Self, input: Ptr<u8>, count: usize) Res<usize, Tls13ClientError> {
+        at: usize ::= 0;
+        loop(() { at < count && self.incoming < self.target }, (h) {
+            amount = (count - at < self.target - self.incoming).match({true => count - at, false => self.target - self.incoming});
+            self.memory.offset(self.incoming).copy_from(input.offset(at), amount);
+            self.incoming = self.incoming + amount; at = at + amount;
+            (self.incoming == 5 && self.target == 5).then(
+                () { self.header().try(); }
+            );
+        }); Ok(at)
+    }
+    // One record maximum. Zero consumption means advance/output must progress,
+    // or the caller supplied no bytes; it never means EOF.
+    feed* = (self :: @Self, input: Ptr<u8>, count: usize) Res<usize, Tls13ClientError> {
+        (self.phase < 9).ensure(Tls13ClientError.Closed).try();
+        (count == 0 || !input.is_null()).ensure(Tls13ClientError.Invalid).try();
+        (self.phase == 0 || self.phase == 6).match({
+            false => Ok(0),
+            true  => self.feed_inner(input, count).match({Ok(n) => Ok(n), Err(e) => { self.abort(); Err(e) }}),
+        })
+    }
+    feed_eof* = (self :: @Self) Res<(), Tls13ClientError> {
+        (self.phase < 9).ensure(Tls13ClientError.Closed).try();
+        self.abort(); Err(Tls13ClientError.Truncated)
+    }
+    receive_record = (self :: @Self) Res<(), Tls13ClientError> {
+        self.records = self.records + 1;
+        (self.records <= 64).ensure(Tls13ClientError.Limit).try();
+        p = self.memory; pending = p.offset(34000);
+        (self.phase == 0).match({
+            true  => {
+                (p.read(0) == 22).ensure(Tls13ClientError.Protocol).try();
+                self.pending = append(
+                    pending,
+                    self.pending,
+                    p.offset(5),
+                    self.target - 5
+                ).try();
+                (self.pending >= 4).then(() {
+                    total = be24(pending.offset(1)) + 4;
+                    (total <= 65536).ensure(Tls13ClientError.Limit).try();
+                    (self.pending >= total).then(() {
+                        (self.pending == total).ensure(
+                            Tls13ClientError.Protocol
+                        ).try(); self.phase = 1;
+                    });
+                });
+            },
+            false => {
+                (p.read(0) == 20).match({
+                    true  => {
+                        self.ccs = self.ccs + 1;
+                        (self.pending == 0 && self.ccs <= 2 && self.target == 6 && p.read(5) == 1).ensure(Tls13ClientError.Protocol).try();
+                    },
+                    false => {
+                        keys          = p.offset(166400);
+                        part          = tls13_open(
+                            p.offset(17000),
+                            17000,
+                            p,
+                            self.target,
+                            keys,
+                            keys.offset(32),
+                            self.sequence,
+                            self.scratch.to<u64>(),
+                            4096
+                        ).try(Tls13ClientError.Authentication);
+                        self.sequence = self.sequence + 1;
+                        (part.kind == 22 && part.count <= 36 - self.pending).ensure(
+                            Tls13ClientError.Protocol
+                        ).try();
+                        self.pending = append(
+                            pending,
+                            self.pending,
+                            p.offset(17000),
+                            part.count
+                        ).try();
+                        (self.pending == 36).then(() { self.phase = 7; });
+                    },
+                });
+            },
+        });
+        self.incoming = 0; self.target = 5; Ok(())
+    }
+    prepare_hello = (self :: @Self) Res<(), Tls13ClientError> {
+        memory        = self.memory;
+        scratch       = self.scratch.to<u64>();
+        record        = memory;
+        plain         = memory.offset(17000);
+        pending       = memory.offset(34000);
+        transcript    = memory.offset(100000);
+        schedule      = memory.offset(166000);
+        digest        = memory.offset(166600);
+        verify        = memory.offset(166700);
+        private_key   = memory.offset(168000);
+        public_key    = memory.offset(168032);
+        peer_public   = memory.offset(168064);
+        shared_secret = memory.offset(168096);
+        hello         = client_hello(
+            pending,
+            self.pending,
+            self.identity,
+            memory
+        ).try(Tls13ClientError.Protocol);
+        hash(digest, pending, hello.binder_at, memory).try();
+        tls13_binder(verify, 32, self.psk, self.psk_count, digest, scratch, 4096).ensure(Tls13ClientError.Invalid).try();
+        equal(verify, hello.binder, 32).ensure(Tls13ClientError.Authentication).try();
+        // Neither ServerHello nor encrypted server messages are sent before binder
+        // authentication and native X25519 all-zero shared-secret rejection.
+
+        x25519_public_key(public_key, 32, private_key, scratch, 4096).ensure(Tls13ClientError.Invalid).try();
+        x25519_shared_secret(shared_secret, 32, private_key, peer_public, scratch, 4096).ensure(Tls13ClientError.Authentication).try();
+        Range(0, 32).loop((i) { private_key.write(i, 0); });
+        Range(0, 32768).loop((i) { self.scratch.write(i, 0); });
+        self.transcript_count = append(
+            transcript,
+            0,
+            pending,
+            self.pending
+        ).try();
+        sh_count              = 96 + hello.session.len;
+        writer ::= ByteWriter.open(
+            plain,
+            sh_count
+        ).try(Tls13ClientError.Invalid);
+        writer.write_be(2, 1).try(Tls13ClientError.Invalid); writer.write_be((sh_count - 4).to_u64(), 3).try(Tls13ClientError.Invalid);
+        writer.write_be(771, 2).try(Tls13ClientError.Invalid);
+        Range(0, 32).loop((i) { writer.write_be(self.memory.offset(178192).read(i).to_u64(), 1).try(Tls13ClientError.Invalid); });
+        writer.write_be(
+            hello.session.len.to_u64(),
+            1
+        ).try(Tls13ClientError.Invalid);
+        Range(0, hello.session.len).loop((i) { writer.write_be(hello.session.ptr().read(i).to_u64(), 1).try(Tls13ClientError.Invalid); });
+        writer.write_be(4867, 2).try(Tls13ClientError.Invalid); writer.write_be(0, 1).try(Tls13ClientError.Invalid); writer.write_be(52, 2).try(Tls13ClientError.Invalid);
+        writer.write_be(43, 2).try(Tls13ClientError.Invalid); writer.write_be(2, 2).try(Tls13ClientError.Invalid); writer.write_be(772, 2).try(Tls13ClientError.Invalid);
+        writer.write_be(51, 2).try(Tls13ClientError.Invalid); writer.write_be(36, 2).try(Tls13ClientError.Invalid); writer.write_be(29, 2).try(Tls13ClientError.Invalid); writer.write_be(32, 2).try(Tls13ClientError.Invalid);
+        Range(0, 32).loop((i) { writer.write_be(public_key.read(i).to_u64(), 1).try(Tls13ClientError.Invalid); });
+        writer.write_be(41, 2).try(Tls13ClientError.Invalid); writer.write_be(2, 2).try(Tls13ClientError.Invalid); writer.write_be(0, 2).try(Tls13ClientError.Invalid);
+        (writer.written() == sh_count).ensure(Tls13ClientError.Invalid).try();
+        self.transcript_count = append(
+            transcript,
+            self.transcript_count,
+            plain,
+            sh_count
+        ).try();
+        hash(digest, transcript, self.transcript_count, memory).try();
+        tls13_handshake_secrets_dhe(schedule, 128, self.psk, self.psk_count, shared_secret, digest, scratch, 4096).ensure(Tls13ClientError.Invalid).try();
+        Range(0, 32).loop((i) { shared_secret.write(i, 0); });
+        Range(0, 32768).loop((i) { self.scratch.write(i, 0); });
+        record.write(0, 22); record.write(1, 3); record.write(2, 3);
+        record.write(3, (sh_count / 256).to_u8().ok_or(Tls13ClientError.Invalid).try()); record.write(4, (sh_count % 256).to_u8().ok_or(Tls13ClientError.Invalid).try());
+        record.offset(5).copy_from(plain, sh_count); self.outgoing = sh_count + 5; self.acknowledged = 0; self.phase = 2;
+
+        Ok(())
+    }
+    prepare_flight = (self :: @Self) Res<(), Tls13ClientError> {
+        memory     = self.memory;
+        scratch    = self.scratch.to<u64>();
+        record     = memory;
+        plain      = memory.offset(17000);
+        transcript = memory.offset(100000);
+        schedule   = memory.offset(166000);
+        keys       = memory.offset(166400);
+        digest     = memory.offset(166600);
+        verify     = memory.offset(166700);
+        // Empty EncryptedExtensions; no optional extension is negotiated.
+        plain.write(0, 8); plain.write(1, 0); plain.write(2, 0); plain.write(3, 2); plain.write(4, 0); plain.write(5, 0);
+        self.transcript_count = append(
+            transcript,
+            self.transcript_count,
+            plain,
+            6
+        ).try();
+        hash(digest, transcript, self.transcript_count, memory).try();
+        tls13_finished(verify, 32, schedule.offset(96), digest, scratch, 4096).ensure(Tls13ClientError.Invalid).try();
+        plain.write(6, 20); plain.write(7, 0); plain.write(8, 0); plain.write(9, 32); plain.offset(10).copy_from(verify, 32);
+        self.transcript_count = append(
+            transcript,
+            self.transcript_count,
+            plain.offset(6),
+            36
+        ).try();
+        tls13_traffic_keys(keys, 44, schedule.offset(96), scratch, 4096).ensure(Tls13ClientError.Invalid).try();
+        sealed        = tls13_seal(
+            record,
+            17000,
+            plain,
+            42,
+            22,
+            keys,
+            keys.offset(32),
+            0,
+            scratch,
+            4096
+        ).try(Tls13ClientError.Invalid);
+        self.outgoing = sealed; self.acknowledged = 0; self.phase = 4;
+
+        Ok(())
+    }
+    prepare_verify = (self :: @Self) Res<(), Tls13ClientError> {
+        memory     = self.memory;
+        scratch    = self.scratch.to<u64>();
+        transcript = memory.offset(100000);
+        schedule   = memory.offset(166000);
+        app        = memory.offset(166200);
+        keys       = memory.offset(166400);
+        digest     = memory.offset(166600);
+        verify     = memory.offset(166700);
+        hash(digest, transcript, self.transcript_count, memory).try();
+        tls13_application_secrets(app, 96, schedule.offset(32), digest, scratch, 4096).ensure(Tls13ClientError.Invalid).try();
+        tls13_finished(verify, 32, schedule.offset(64), digest, scratch, 4096).ensure(Tls13ClientError.Invalid).try();
+        tls13_traffic_keys(keys, 44, schedule.offset(64), scratch, 4096).ensure(Tls13ClientError.Invalid).try();
+        self.pending = 0; self.phase = 6;
+
+        Ok(())
+    }
+    finish = (self :: @Self) Res<(), Tls13ClientError> {
+        memory  = self.memory;
+        scratch = self.scratch.to<u64>();
+        pending = memory.offset(34000);
+        app     = memory.offset(166200);
+        verify  = memory.offset(166700);
+        (pending.read(0) == 20 && be24(pending.offset(1)) == 32).ensure(Tls13ClientError.Protocol).try();
+        equal(verify, pending.offset(4), 32).ensure(Tls13ClientError.Authentication).try();
+        // Adopt reverses the client role: server application traffic sends first,
+        // client application traffic receives second. Both record counters start 0.
+        tls13_traffic_keys(memory.offset(34000), 44, app.offset(64), scratch, 4096).ensure(Tls13ClientError.Invalid).try();
+        tls13_traffic_keys(memory.offset(34044), 44, app.offset(32), scratch, 4096).ensure(Tls13ClientError.Invalid).try();
+        Range(34088, 180000).loop((i) { memory.write(i, 0); });
+        Range(0, 32768).loop((i) { self.scratch.write(i, 0); });
+        self.phase = 8;
+
+        Ok(())
+    }
+
+    step = (self :: @Self) Res<(), Tls13ClientError> {
+        self.phase.match({
+            0 => { (self.incoming == self.target).then(
+                () { self.receive_record().try(); }
+            ); },
+            1 => self.prepare_hello().try(),
+            3 => self.prepare_flight().try(),
+            5 => self.prepare_verify().try(),
+            6 => { (self.incoming == self.target).then(
+                () { self.receive_record().try(); }
+            ); },
+            7 => self.finish().try(),
+            _ => (),
+        }); Ok(())
+    }
+    advance* = (self :: @Self) Res<Tls13ServerProgress, Tls13ClientError> {
+        (self.phase < 9).ensure(Tls13ClientError.Closed).try();
+        self.step().match({Ok(_) => Ok(()), Err(e) => { self.abort(); Err(e) }}).try();
+        Ok(self.phase.match({
+            0 => Tls13ServerProgress.NeedInput,
+            6 => Tls13ServerProgress.NeedInput,
+            2 => Tls13ServerProgress.NeedOutput,
+            4 => Tls13ServerProgress.NeedOutput,
+            8 => Tls13ServerProgress.Established,
+            _ => Tls13ServerProgress.Runnable,
+        }))
+    }
+    // Transfers allocations exactly once. The emptied handshake may be dropped.
+    take_session* = (self :: @Self) Res<Tls13Session, Tls13ClientError> {
+        (self.phase < 9).ensure(Tls13ClientError.Closed).try();
+        (self.phase == 8).ensure(Tls13ClientError.Invalid).try();
+        memory = self.memory; scratch = self.scratch;
+        self.memory = null_ptr<u8>(); self.scratch = null_ptr<u8>(); self.phase = 10;
+        Ok(Tls13Session.adopt(self.alloc, self.socket, memory, scratch))
+    }
+}
+Tls13ServerHandshake.impl(Drop, { drop = (self :: @Self) { self.abort() } })
+
+// Compatibility driver; only this function performs socket I/O. A reactor
+// drives the same engine directly and retains unconsumed input itself.
+tls13_psk_dhe_accept* = (a: Alloc, socket: SocketFd, identity: str, psk: Ptr<u8>, psk_count: usize, random: Ptr<u8>, ephemeral_private: Ptr<u8>) Res<Tls13Session, Tls13ClientError
+    | AllocError> {
+    engine ::= Tls13ServerHandshake.open(
         a,
         socket,
         identity,
         psk,
         psk_count,
         random,
-        ephemeral_private,
-        memory,
-        scratch
-    ).match({
-        Ok(session) => Ok(consume session),
-        Err(e)      => {
-            Range(0, 180000).loop((i) { memory.write(i, 0); });
-            Range(0, 32768).loop((i) { scratch.write(i, 0); });
-            a.free(scratch); a.free(memory); Err(e)
-        },
-    })
-}
-
-handshake = (
-    a                 : Alloc,
-    socket            : SocketFd,
-    identity          : str,
-    psk               : Ptr<u8>,
-    psk_count         : usize,
-    random            : Ptr<u8>,
-    ephemeral_private : Ptr<u8>,
-    memory            : Ptr<u8>,
-    scratch_bytes     : Ptr<u8>
-) Res<Tls13Session, Tls13ClientError> {
-    scratch = scratch_bytes.to<u64>();
-    record  = memory; plain = memory.offset(17000); pending = memory.offset(34000); transcript = memory.offset(100000);
-    schedule = memory.offset(166000); app = memory.offset(166200); keys = memory.offset(166400); digest = memory.offset(166600); verify = memory.offset(166700);
-    private_key = memory.offset(168000); public_key = memory.offset(168032); peer_public = memory.offset(168064); shared_secret = memory.offset(168096);
-    pending_count ::= 0; records ::= 0; complete ::= false;
-    loop(() { !complete }, (h) {
-        records = records + 1; (records <= 64).ensure(
-            Tls13ClientError.Limit
-        ).try();
-        size = read_record(socket, record, true).try();
-        (record.read(0) == 22).ensure(Tls13ClientError.Protocol).try();
-        pending_count = append(
-            pending,
-            pending_count,
-            record.offset(5),
-            size - 5
-        ).try();
-        (pending_count >= 4).then(() {
-            total = be24(pending.offset(1)) + 4;
-            (total <= 65536).ensure(Tls13ClientError.Limit).try();
-            (pending_count >= total).then(() {
-                (pending_count == total).ensure(
-                    Tls13ClientError.Protocol
-                ).try(); complete = true;
-            });
+        ephemeral_private
+    ).try();
+    result ::= false;
+    loop(() { !result }, (h) {
+        engine.advance().try().match({
+            NeedOutput  => {
+                pending = engine.pending_output();
+                n       = socket.send(
+                    pending.data,
+                    pending.count,
+                    0
+                ).try(Tls13ClientError.Io);
+                (n > 0).ensure(Tls13ClientError.Io).try(); engine.acknowledge(n).try();
+            },
+            NeedInput   => {
+                // Read exactly the outstanding header/body; no application
+                // ciphertext is consumed before the session handoff.
+                p = engine.memory.offset(17000);
+                n = socket.recv(
+                    p,
+                    engine.target - engine.incoming
+                ).try(Tls13ClientError.Io);
+                (n > 0).ensure(Tls13ClientError.Truncated).try(); engine.feed(p, n).try();
+            },
+            Runnable    => (),
+            Established => { result = true; },
         });
     });
-    hello = client_hello(
-        pending,
-        pending_count,
-        identity,
-        memory
-    ).try(Tls13ClientError.Protocol);
-    hash(digest, pending, hello.binder_at, memory).try();
-    tls13_binder(verify, 32, psk, psk_count, digest, scratch, 4096).ensure(Tls13ClientError.Invalid).try();
-    equal(verify, hello.binder, 32).ensure(Tls13ClientError.Authentication).try();
-    // Neither ServerHello nor encrypted server messages are sent before binder
-    // authentication and native X25519 all-zero shared-secret rejection.
-    private_key.copy_from(ephemeral_private, 32);
-    x25519_public_key(public_key, 32, private_key, scratch, 4096).ensure(Tls13ClientError.Invalid).try();
-    x25519_shared_secret(shared_secret, 32, private_key, peer_public, scratch, 4096).ensure(Tls13ClientError.Authentication).try();
-    Range(0, 32).loop((i) { private_key.write(i, 0); });
-    Range(0, 32768).loop((i) { scratch_bytes.write(i, 0); });
-    transcript_count ::= append(transcript, 0, pending, pending_count).try();
-    sh_count = 96 + hello.session.len;
-    writer ::= ByteWriter.open(plain, sh_count).try(Tls13ClientError.Invalid);
-    writer.write_be(2, 1).try(Tls13ClientError.Invalid); writer.write_be((sh_count - 4).to_u64(), 3).try(Tls13ClientError.Invalid);
-    writer.write_be(771, 2).try(Tls13ClientError.Invalid);
-    Range(0, 32).loop((i) { writer.write_be(random.read(i).to_u64(), 1).try(Tls13ClientError.Invalid); });
-    writer.write_be(
-        hello.session.len.to_u64(),
-        1
-    ).try(Tls13ClientError.Invalid);
-    Range(0, hello.session.len).loop((i) { writer.write_be(hello.session.ptr().read(i).to_u64(), 1).try(Tls13ClientError.Invalid); });
-    writer.write_be(4867, 2).try(Tls13ClientError.Invalid); writer.write_be(0, 1).try(Tls13ClientError.Invalid); writer.write_be(52, 2).try(Tls13ClientError.Invalid);
-    writer.write_be(43, 2).try(Tls13ClientError.Invalid); writer.write_be(2, 2).try(Tls13ClientError.Invalid); writer.write_be(772, 2).try(Tls13ClientError.Invalid);
-    writer.write_be(51, 2).try(Tls13ClientError.Invalid); writer.write_be(36, 2).try(Tls13ClientError.Invalid); writer.write_be(29, 2).try(Tls13ClientError.Invalid); writer.write_be(32, 2).try(Tls13ClientError.Invalid);
-    Range(0, 32).loop((i) { writer.write_be(public_key.read(i).to_u64(), 1).try(Tls13ClientError.Invalid); });
-    writer.write_be(41, 2).try(Tls13ClientError.Invalid); writer.write_be(2, 2).try(Tls13ClientError.Invalid); writer.write_be(0, 2).try(Tls13ClientError.Invalid);
-    (writer.written() == sh_count).ensure(Tls13ClientError.Invalid).try();
-    transcript_count = append(
-        transcript,
-        transcript_count,
-        plain,
-        sh_count
-    ).try();
-    hash(digest, transcript, transcript_count, memory).try();
-    tls13_handshake_secrets_dhe(schedule, 128, psk, psk_count, shared_secret, digest, scratch, 4096).ensure(Tls13ClientError.Invalid).try();
-    Range(0, 32).loop((i) { shared_secret.write(i, 0); });
-    Range(0, 32768).loop((i) { scratch_bytes.write(i, 0); });
-    record.write(0, 22); record.write(1, 3); record.write(2, 3);
-    record.write(3, (sh_count / 256).to_u8().ok_or(Tls13ClientError.Invalid).try()); record.write(4, (sh_count % 256).to_u8().ok_or(Tls13ClientError.Invalid).try());
-    record.offset(5).copy_from(plain, sh_count); write_all(socket, record, sh_count + 5).try();
-    // Empty EncryptedExtensions; no optional extension is negotiated.
-    plain.write(0, 8); plain.write(1, 0); plain.write(2, 0); plain.write(3, 2); plain.write(4, 0); plain.write(5, 0);
-    transcript_count = append(transcript, transcript_count, plain, 6).try();
-    hash(digest, transcript, transcript_count, memory).try();
-    tls13_finished(verify, 32, schedule.offset(96), digest, scratch, 4096).ensure(Tls13ClientError.Invalid).try();
-    plain.write(6, 20); plain.write(7, 0); plain.write(8, 0); plain.write(9, 32); plain.offset(10).copy_from(verify, 32);
-    transcript_count = append(
-        transcript,
-        transcript_count,
-        plain.offset(6),
-        36
-    ).try();
-    tls13_traffic_keys(keys, 44, schedule.offset(96), scratch, 4096).ensure(Tls13ClientError.Invalid).try();
-    sealed = tls13_seal(
-        record,
-        17000,
-        plain,
-        42,
-        22,
-        keys,
-        keys.offset(32),
-        0,
-        scratch,
-        4096
-    ).try(Tls13ClientError.Invalid);
-    write_all(socket, record, sealed).try();
-    hash(digest, transcript, transcript_count, memory).try();
-    tls13_application_secrets(app, 96, schedule.offset(32), digest, scratch, 4096).ensure(Tls13ClientError.Invalid).try();
-    tls13_finished(verify, 32, schedule.offset(64), digest, scratch, 4096).ensure(Tls13ClientError.Invalid).try();
-    tls13_traffic_keys(keys, 44, schedule.offset(64), scratch, 4096).ensure(Tls13ClientError.Invalid).try();
-    pending_count = 0; ccs ::= 0; sequence: u64 ::= 0;
-    loop(() { pending_count < 36 }, (h) {
-        records = records + 1; (records <= 64).ensure(
-            Tls13ClientError.Limit
-        ).try();
-        size = read_record(socket, record, false).try();
-        (record.read(0) == 20).match({
-            true  => {
-                ccs = ccs + 1;
-                (pending_count == 0 && ccs <= 2 && size == 6 && record.read(5) == 1).ensure(Tls13ClientError.Protocol).try();
-            },
-            false => {
-                part     = tls13_open(
-                    plain,
-                    17000,
-                    record,
-                    size,
-                    keys,
-                    keys.offset(32),
-                    sequence,
-                    scratch,
-                    4096
-                ).try(Tls13ClientError.Authentication);
-                sequence = sequence + 1;
-                (part.kind == 22 && part.count <= 36 - pending_count).ensure(
-                    Tls13ClientError.Protocol
-                ).try();
-                pending_count = append(
-                    pending,
-                    pending_count,
-                    plain,
-                    part.count
-                ).try();
-            },
-        });
-    });
-    (pending.read(0) == 20 && be24(pending.offset(1)) == 32).ensure(Tls13ClientError.Protocol).try();
-    equal(verify, pending.offset(4), 32).ensure(Tls13ClientError.Authentication).try();
-    // Adopt reverses the client role: server application traffic sends first,
-    // client application traffic receives second. Both record counters start 0.
-    tls13_traffic_keys(memory.offset(34000), 44, app.offset(64), scratch, 4096).ensure(Tls13ClientError.Invalid).try();
-    tls13_traffic_keys(memory.offset(34044), 44, app.offset(32), scratch, 4096).ensure(Tls13ClientError.Invalid).try();
-    Range(34088, 180000).loop((i) { memory.write(i, 0); });
-    Range(0, 32768).loop((i) { scratch_bytes.write(i, 0); });
-    Ok(Tls13Session.adopt(a, socket, memory, scratch_bytes))
+    engine.take_session()
 }

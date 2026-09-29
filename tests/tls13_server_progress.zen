@@ -1,0 +1,189 @@
+Pool, PoolAlloc, PoolPolicy = std.mem.mem_pool
+Tls13ServerHandshake, Tls13ServerProgress = tls13_server
+Tls13ClientError, Tls13Session = tls13_session
+SocketFd = std.net.socket
+fixture, VECTOR_COUNT = progress_oracle
+Failure = Mismatch | Accepted | Ownership | WorkLimit
+Tracking = { base: Alloc, allocations: Ptr<usize>, frees: Ptr<usize> }
+Tracking.impl(Alloc, {
+    raw = (self: @Self, count: usize, align: usize) Res<Ptr<u8>, AllocError> {
+        out = self.base.raw(count, align).try();
+        self.allocations.write(0, self.allocations.read(0) + 1); Ok(out)
+    }
+    realloc = <T>(self: @Self, p: Ptr<T>, count: usize) Res<Ptr<T>, AllocError> {
+        p.is_null().ensure(AllocError.OutOfMemory).try();
+        out = self.raw(p.bytes(count), 16).try(); Ok(out.to<T>())
+    }
+    free = <T>(self: @Self, p: Ptr<T>) {
+        self.frees.write(0, self.frees.read(0) + 1); self.base.free(p);
+    }
+})
+equal = (a: Ptr<u8>, b: Ptr<u8>, count: usize) bool {
+    Range(0, count).find((i) { a.read(i) != b.read(i) }).match({None => true, Ok(_) => false})
+}
+opened = (a: Alloc, material: Ptr<u8>) Res<Tls13ServerHandshake, AllocError
+    | Tls13ClientError> {
+    Range(0, 96).loop((i) { material.write(i, i.to_u8().match({Ok(b) => b, None => 0})); });
+    Tls13ServerHandshake.open(
+        a,
+        SocketFd(raw: -1),
+        "ZenTest",
+        material,
+        32,
+        material.offset(32),
+        material.offset(64)
+    )
+}
+settle = (h :: Tls13ServerHandshake) Res<Tls13ServerProgress, Tls13ClientError
+    | Failure> {
+    state  ::= Tls13ServerProgress.Runnable;
+    rounds ::= 0;
+    loop(() { state.match({Runnable => true, _ => false}) }, (looping) {
+        (rounds < 16).ensure(Failure.WorkLimit).try(); rounds = rounds + 1;
+        state = h.advance().try();
+    }); Ok(state)
+}
+input = (h :: Tls13ServerHandshake, bytes: Ptr<u8>, count: usize, step: usize) Res<Tls13ServerProgress, Tls13ClientError
+    | Failure> {
+    at ::= 0; state ::= Tls13ServerProgress.NeedInput;
+    loop(() { at < count }, (looping) {
+        ask = (count-at < step).match({true => count-at, false => step});
+        got = h.feed(bytes.offset(at), ask).try();
+        (got > 0 && got <= ask).ensure(Failure.Mismatch).try(); at = at + got;
+        state = h.settle().try();
+        (at < count).then(
+            () { state.match({NeedInput => Ok(()), _ => Err(Failure.Mismatch)}).try(); }
+        );
+    }); Ok(state)
+}
+drain = (h :: Tls13ServerHandshake, expected: Ptr<u8>, count: usize, step: usize) Res<(), Tls13ClientError
+    | Failure> {
+    at ::= 0;
+    loop(() { at < count }, (looping) {
+        h.settle().try().match({NeedOutput => Ok(()), _ => Err(Failure.Mismatch)}).try();
+        pending = h.pending_output();
+        (pending.count > 0 && pending.count <= count-at && equal(pending.data, expected.offset(at), pending.count)).ensure(Failure.Mismatch).try();
+        h.acknowledge(0).try();
+        h.acknowledge(pending.count + 1).match({Err(Invalid) => Ok(()), _ => Err(Failure.Accepted)}).try();
+        h.advance().try().match({NeedOutput => Ok(()), _ => Err(Failure.Mismatch)}).try();
+        (h.pending_output().count == pending.count && equal(h.pending_output().data, expected.offset(at), pending.count)).ensure(Failure.Mismatch).try();
+        (h.feed(expected, 1).try() == 0).ensure(Failure.Mismatch).try();
+        take = (pending.count < step).match({true => pending.count, false => step});
+        h.acknowledge(take).try(); at = at + take;
+    });
+    h.settle().try().match({NeedInput => Ok(()), _ => Err(Failure.Mismatch)})
+}
+exercise = (a: Alloc, material: Ptr<u8>, wire: Ptr<u8>, expected: Ptr<u8>, step: usize, fragmented: bool) Res<(), AllocError
+    | Tls13ClientError
+    | Failure> {
+    h ::= opened(a, material).try();
+    h.take_session().match({Err(Invalid) => Ok(()), _ => Err(Failure.Accepted)}).try();
+    h.settle().try().match({NeedInput => Ok(()), _ => Err(Failure.Mismatch)}).try();
+    (h.feed(null_ptr<u8>(), 0).try() == 0).ensure(Failure.Mismatch).try();
+    h.feed(null_ptr<u8>(), 1).match({Err(Invalid) => Ok(()), _ => Err(Failure.Accepted)}).try();
+    h.acknowledge(1).match({Err(Invalid) => Ok(()), _ => Err(Failure.Accepted)}).try();
+    // The engine must copy its random/private inputs rather than borrow them.
+    Range(32, 96).loop((i) { material.write(i, 0); });
+    count = fixture(fragmented.match({true => 1, false => 0}), wire);
+    h.input(wire, count, step).try().match({NeedOutput => Ok(()), _ => Err(Failure.Mismatch)}).try();
+    flight = fixture(2, expected); h.drain(expected, flight, step).try();
+    finished = fixture(fragmented.match({true => 4,false => 3}), wire);
+    fragmented.match({
+        true  => h.input(wire, finished, step).try().match({Established => Ok(()), _ => Err(Failure.Mismatch)}),
+        false => {
+            app = fixture(7, wire.offset(finished));
+            (h.feed(wire, finished+app).try() == finished).ensure(Failure.Mismatch).try();
+            h.settle().try().match({Established => Ok(()), _ => Err(Failure.Mismatch)})
+        },
+    }).try();
+    h.advance().try().match({Established => Ok(()), _ => Err(Failure.Mismatch)}).try();
+    session ::= h.take_session().try();
+    h.take_session().match({Err(Closed) => Ok(()), _ => Err(Failure.Accepted)}).try();
+    h.abort(); h.abort();
+    app = fixture(7, wire); (session.feed(wire, app).try() == app).ensure(Failure.Mismatch).try();
+    session.read_plaintext(material, 32).try().match({Data(n) => (n == 5).ensure(Failure.Mismatch), _ => Err(Failure.Mismatch)}).try();
+    equal(material, "hello".ptr(), 5).ensure(Failure.Mismatch).try();
+    session.queue_record("world".ptr(), 5).try(); reply=fixture(8, expected);
+    (session.pending_output().count == reply && equal(session.pending_output().data, expected, reply)).ensure(Failure.Mismatch).try();
+    session.abort(); session.abort(); Ok(())
+}
+reject = (a: Alloc, material: Ptr<u8>, wire: Ptr<u8>, expected: Ptr<u8>, mode: usize) Res<(), AllocError
+    | Tls13ClientError
+    | Failure> {
+    h ::= opened(a, material).try();
+    (mode > 0).then(() {
+        n =fixture(0, wire); h.input(wire, n, 7).try();
+        count =fixture(2, expected); h.drain(expected, count, 11).try();
+    });
+    vector =mode.match({0 => 5, 1 => 6, 2 => 9, _ => 10});
+    n      =fixture(vector, wire);
+    result =h.input(wire, n, 1);
+    (mode < 3).match({
+        true  => result.match({Err(Authentication) => Ok(()), _ => Err(Failure.Accepted)}),
+        false => result.match({Err(Protocol) => Ok(()), _ => Err(Failure.Accepted)}),
+    }).try();
+    (h.pending_output().count == 0).ensure(Failure.Mismatch).try();
+    h.take_session().match({Err(Closed) => Ok(()), _ => Err(Failure.Accepted)}).try();
+    h.abort(); h.abort(); Ok(())
+}
+cut = (a: Alloc, material: Ptr<u8>, wire: Ptr<u8>, expected: Ptr<u8>, phase: usize, count: usize) Res<(), AllocError
+    | Tls13ClientError
+    | Failure> {
+    h ::= opened(a, material).try();
+    (phase > 0).then(() {
+        n =fixture(0, wire); h.input(wire, n, 4096).try();
+        (phase > 1).then(
+            () { flight=fixture(2, expected); h.drain(expected, flight, 4096).try(); }
+        );
+    });
+    (phase != 1).then(() {
+        fixture((phase == 0).match({true => 0,false => 3}), wire);
+        (h.feed(wire, count).try() == count).ensure(Failure.Mismatch).try();
+    });
+    h.feed_eof().match({Err(Truncated) => Ok(()), _ => Err(Failure.Accepted)}).try();
+    h.abort(); h.abort(); Ok(())
+}
+cancel = (a: Alloc, material: Ptr<u8>, wire: Ptr<u8>, after_hello: bool) Res<(), AllocError
+    | Tls13ClientError
+    | Failure> {
+    h ::= opened(a, material).try();
+    after_hello.then(() {
+        count = fixture(0, wire); h.input(wire, count, 4096).try();
+        h.acknowledge(1).try();
+    });
+    h.abort(); h.abort();
+    (h.pending_output().count == 0).ensure(Failure.Mismatch).try();
+    h.advance().match({Err(Closed) => Ok(()), _ => Err(Failure.Accepted)}).try();
+    h.take_session().match({Err(Closed) => Ok(()), _ => Err(Failure.Accepted)})
+}
+main = (env: Env) Res<(), AllocError | Tls13ClientError | Failure> {
+    base =env.mem.alloc(); counts=base.realloc<usize>(null_ptr<usize>(), 2).try(); counts.write(0, 0); counts.write(1, 0);
+    pool = base.realloc<Pool>(null_ptr<Pool>(), 1).try(); pool.write(0, Pool());
+    @scope.defer(() { state ::= pool.read(0); state.close(); });
+    pooled   = PoolAlloc(
+        pool: pool,
+        policy: PoolPolicy(cache_bytes: 0, block_bytes: 0, blocks: 0)
+    );
+    a        = Tracking(
+        base: pooled,
+        allocations: counts,
+        frees: counts.offset(1)
+    );
+    material =base.raw(96, 8).try(); wire=base.raw(4096, 8).try(); expected=base.raw(4096, 8).try();
+    exercise(a, material, wire, expected, 1, true).try();
+    exercise(a, material, wire, expected, 7, true).try();
+    exercise(a, material, wire, expected, 4096, false).try();
+    exercise(a, material, wire, expected, 4096, true).try();
+    Range(0, 4).loop((mode) { reject(a, material, wire, expected, mode).try(); });
+    Range(0, 8).loop((prefix) { cut(a, material, wire, expected, 0, prefix).try(); cut(a, material, wire, expected, 2, prefix).try(); });
+    cut(a, material, wire, expected, 1, 0).try();
+    hello_count = fixture(0, wire); cut(a, material, wire, expected, 0, hello_count - 1).try();
+    finished_count = fixture(3, wire); cut(a, material, wire, expected, 2, finished_count - 1).try();
+    cancel(a, material, wire, false).try(); cancel(a, material, wire, true).try();
+    (pool.read(0).snapshot().owned_bytes == 0).ensure(Failure.Ownership).try();
+    (counts.read(0) == 58 && counts.read(1) == 58).ensure(Failure.Ownership).try();
+    println(
+        "server progress: fragmented/coalesced input, short/zero ack, oracle flight, authentication barriers, EOF and exactly-once handoff PASS"
+    );
+    Ok(())
+}
