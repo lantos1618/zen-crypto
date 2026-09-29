@@ -155,5 +155,12 @@ normal Drop or repeated abort. Disconnected writes must return errors without
 SIGPIPE termination; the borrowed descriptor must come from std `Socket`, which
 sets the platform socket protections. The session tests inspect undefined
 symbols for crypto backend calls. ASan instrumentation did not reach a peer
-handshake within the local timeout; ASan validation is not claimed. The Linux
-results above predate this session extension.
+handshake within the local timeout; macOS ASan validation is not claimed.
+
+The reusable session extension at `942bbc4` also passes the full
+`scripts/check-tls13.sh` suite on Linux x86_64 with Clang 18.1.3 and OpenSSL
+3.5.4. A separate session run passes with both ASan and UBSan enabled, including
+all 11 independent peer cases and 100 OpenSSL exchanges. Instrumentation was
+confirmed from the resulting executable symbols.
+[Exact revisions, commands, coverage and limitations](../tests/validation/tls13-session-linux-2026-09-29.txt)
+record this run; these results do not extend the supported protocol profile.

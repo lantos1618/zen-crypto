@@ -1,0 +1,91 @@
+Native PSK TLS 1.3 session Linux validation, 2026-09-29
+
+Published revisions and provenance
+  zen-crypto: 942bbc4b7262a49c46c4a77354170f4f442a6d71
+    https://github.com/lantos1618/zen-crypto/commit/942bbc4b7262a49c46c4a77354170f4f442a6d71
+  zen compiler/std: 6494242457685b3bf0ada430edc812414fe0bc22
+    https://github.com/lantos1618/zen/commit/6494242457685b3bf0ada430edc812414fe0bc22
+  Compiler: zen/build/bootstrap/zen-seed
+  Compiler SHA-256:
+    962f1d95654887ece7f7ae8c19de622b49b9f921544518822fd0e18d78e4d928
+  Public crypto main was fetched and fast-forwarded from clean 96ec042.
+  No tracked files were changed on the validation checkout.
+
+Environment
+  Linux 6.8.0-139-generic x86_64, Ubuntu
+  Ubuntu Clang 18.1.3 (1ubuntu1)
+  Python 3.12.3, cryptography 41.0.7 (independent test peer only)
+  OpenSSL 3.5.4 reference server (30 Sep 2025)
+  Isolated root: /home/ubuntu/zen-native-crypto-validation-20260928
+
+Full published suite, executed from the zen-crypto subdirectory
+  ZEN_COMPILER=../zen/build/bootstrap/zen-seed \
+  ZEN_STD=../zen/src PYTHON=python3 CC=clang \
+  OPENSSL=/home/ubuntu/zen-http-validation-20260928-1952/zen-http/build/openssl/bin/openssl \
+  scripts/check-tls13.sh
+
+Exit status: 0
+Condensed output:
+  PASS independent schedule + 12 ChaCha20 record vectors, padding and tampering; no external crypto linked
+  PASS no external crypto symbols and wrong TLS label negative control
+  PASS OpenSSL PSK authenticated exchange
+  PASS OpenSSL wrong PSK rejected
+  PASS independent fragmented PSK peer valid
+  PASS independent fragmented PSK peer bad-finished
+  PASS independent fragmented PSK peer truncated-finished
+  PASS independent fragmented PSK peer tamper
+  PASS independent fragmented PSK peer hrr
+  PASS independent fragmented PSK peer oversized-plaintext
+  PASS native-only client symbols, interoperability and malicious peer rejection
+  PASS OpenSSL alignment regression control
+  PASS session reference 0,1,2,3,4,5,6,8,9,10,11
+  PASS OpenSSL 100 exchanges, partial reads and close_notify
+  PASS native-only symbols, UBSan, aligned allocation and exactly-once release
+
+Additional ASan + UBSan session check
+  An ignored executable compiler wrapper at the isolated root contained:
+    #!/bin/sh
+    exec clang -fsanitize=address "$@"
+  The published runner also supplies -fsanitize=undefined and
+  -fno-sanitize-recover=all. No production or test source was changed.
+
+  ZEN_COMPILER=../zen/build/bootstrap/zen-seed \
+  ZEN_STD=../zen/src PYTHON=python3 \
+  CC=/home/ubuntu/zen-native-crypto-validation-20260928/tls-session-asan-cc \
+  OPENSSL=/home/ubuntu/zen-http-validation-20260928-1952/zen-http/build/openssl/bin/openssl \
+  python3 scripts/check-tls13-session.py
+
+Exit status: 0
+  All 11 reference cases and 100 OpenSSL exchanges passed again.
+  The final executable contained __asan_init and
+  __ubsan_handle_type_mismatch_v1_abort, confirming both instrumentations.
+  No sanitizer failure was reported. The runner's fixed summary says UBSan;
+  ASan activation was independently verified from the executable symbols.
+
+Coverage
+  - 50000-byte writes split into four records, independently decrypted by peer.
+  - 50000-byte replies split differently and delivered through 137-byte reads.
+  - 100 OpenSSL request/response exchanges with 3-byte reads and close_notify.
+  - Replay, tag alteration, premature EOF, unsupported post-handshake messages,
+   oversized record headers, and excessive empty records fail closed.
+  - Output unchanged on rejected records; subsequent I/O returns Closed.
+  - Disconnected writes return errors without SIGPIPE process termination.
+  - Empty request/response records, zero-capacity empty response, and oversized
+   response rejection preserve the legacy round-trip boundary.
+  - Two explicitly aligned allocations and exactly two frees after Drop or
+   repeated abort; native executables have no external crypto backend symbols.
+
+Retained logs under the isolated root
+  tls-session-environment.txt, tls-session-provenance.txt
+  tls-session-full.log, tls-session-full.exit
+  tls-session-asan.log, tls-session-asan.exit
+
+Limits
+  This tests the PSK-ke development profile, not certificates, hostnames,
+  forward secrecy, DHE/X25519 handshake integration, KeyUpdate, tickets, HTTP/2,
+  or a general TLS server. It is not a security audit, constant-time proof,
+  guaranteed secure-erasure test, or performance comparison.
+  Full-suite UBSan and session-only ASan+UBSan passed; ASan was not applied
+  to the separate key-schedule or legacy-client runner in this experiment.
+  The earlier macOS ASan startup timeout remains a separate observation.
+  No claim about the compiler aggregate verification gate follows from this run.
