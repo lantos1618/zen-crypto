@@ -19,13 +19,16 @@ that generated backend output is distinct from calling an external crypto librar
 - `tls13`: SHA-256 TLS 1.3 key schedule and ChaCha20-Poly1305 records.
 - `x25519_public_key`, `x25519_shared_secret = x25519`: native RFC 7748
   scalar multiplication with caller-owned scratch. See [X25519](docs/X25519.md).
-- `tls13_psk_connect`, `Tls13Session = tls13_client`: reusable external-PSK
-  TLS 1.3 client with authenticated records and shutdown.
+- `tls13_psk_connect`, `tls13_psk_dhe_connect`, `Tls13Session = tls13_client`:
+  reusable external-PSK TLS 1.3 client, with an explicit native X25519 exchange
+  option, authenticated records and shutdown.
   `tls13_psk_round_trip` remains a convenience wrapper. See [TLS scope](docs/TLS13.md).
 
 These are experimental implementations. XChaCha20-Poly1305 and
-certificate-based native TLS are not implemented here yet. The TLS handshake
-still uses `psk_ke`; standalone X25519 is not yet connected to its key exchange.
+certificate-based native TLS are not implemented here yet. The native client
+supports explicit `psk_ke` and X25519 `psk_dhe_ke` profiles; neither verifies
+web certificates. The DHE API requires independently generated public random
+and secret ephemeral key bytes.
 No independent security audit or production side-channel guarantee is claimed. See [the native implementation track](docs/NATIVE_CRYPTO.md).
 
 ## Backend packages and migration

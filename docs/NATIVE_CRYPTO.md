@@ -29,9 +29,10 @@ security. [TLS scope and commands](TLS13.md).
    implementation. Validate each component before composing AEAD. Authentication failure must not expose
    unauthenticated plaintext. Check counter exhaustion and overlap contracts.
 3. SHA-512 and HMAC-SHA512/256 for the `crypto_auth` surface.
-4. Integrate the implemented [X25519 primitive](X25519.md) into TLS
-   `psk_dhe_ke`, then implement the exact libsodium directional key-exchange
-   construction. Certificate authentication remains a separate TLS milestone.
+4. Implement the exact libsodium directional key-exchange construction using
+   the [X25519 primitive](X25519.md). Native TLS now offers explicit
+   `psk_dhe_ke`; certificate authentication, a native server handshake and
+   ALPN remain separate TLS milestones.
 5. Secure comparison/erasure and secret-buffer ownership contracts. Entropy
    still comes from OS cryptographic randomness; ordinary `std.core.rand` is
    not a substitute.
