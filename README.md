@@ -22,11 +22,12 @@ that generated backend output is distinct from calling an external crypto librar
 - `tls13_psk_connect`, `tls13_psk_dhe_connect`, `Tls13Session = tls13_client`:
   reusable external-PSK TLS 1.3 client, with an explicit native X25519 exchange
   option, authenticated records and shutdown. Established sessions also expose
-  bounded byte-fed record progress; handshakes remain blocking.
+  bounded byte-fed record progress; client handshakes remain blocking.
   `tls13_psk_round_trip` remains a convenience wrapper. See [TLS scope](docs/TLS13.md).
 - `tls13_psk_dhe_accept = tls13_server`: native TLS 1.3 server handshake
   over a borrowed connected socket, authenticating the PSK binder and client
-  Finished before returning a reusable session.
+  Finished before returning a reusable session. `Tls13ServerHandshake` exposes
+  the same server protocol as bounded resumable phases for reactor adapters.
 
 These are experimental implementations. XChaCha20-Poly1305 and
 certificate-based native TLS are not implemented here yet. The native client
@@ -50,7 +51,8 @@ Update explicit build dependencies and include paths to the new packages.
 The module names `sodium` and `tls` are retained there. No compatibility forwarding
 modules remain here: importing this package does not silently pull in a backend.
 `zen-http` now has an explicit experimental HTTP client over native PSK sessions.
-Its default certificate-verified client, event-driven server and HTTP/2 still
+It also has an explicit native PSK HTTP/1 reactor using the resumable server
+handshake. Its default certificate-verified client/server and HTTP/2 still
 use `zen-openssl`. This separation does not implement certificate-based native TLS.
 
 ## Build and test without crypto backends
