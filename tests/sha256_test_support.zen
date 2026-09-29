@@ -5,7 +5,7 @@ hkdf_extract_candidate, hkdf_expand_candidate = hkdf
 nibble = (
     byte : u8
 ) u8 { (byte <= 57).match({true => byte - 48, false => byte - 87}) }
-decode = (out: Ptr<u8>, hex: str) () {
+decode = (out: Ptr<u8>, hex: str) {
     Range(0, hex.len / 2).loop((i) { out.write(i, nibble(hex.ptr().read(i * 2)) * 16 + nibble(hex.ptr().read(i * 2 + 1))); });
 }
 matches = (out: Ptr<u8>, hex: str) bool {

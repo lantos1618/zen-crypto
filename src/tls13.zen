@@ -314,7 +314,7 @@ tls13_traffic_keys* = (
         good.then(() { out.copy_from(p, 44); }); good
     }})
 }
-nonce = (out: Ptr<u8>, iv: Ptr<u8>, sequence: u64) () {
+nonce = (out: Ptr<u8>, iv: Ptr<u8>, sequence: u64) {
     out.copy_from(iv, 12); number ::= sequence;
     Range(0, 8).loop((i) {
         byte  = number % 256;

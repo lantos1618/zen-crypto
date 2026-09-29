@@ -1,7 +1,7 @@
 // RFC8439 section2.8.2, standalone: no external crypto library is linked.
 chacha20poly1305_seal, chacha20poly1305_open = chacha20poly1305
 hex_value = (b: u8) u8 { (b <= 57).match({true => b - 48, false => b - 87}) }
-decode = (out: Ptr<u8>, hex: str) () {
+decode = (out: Ptr<u8>, hex: str) {
     Range(0, hex.len / 2).loop((i) { out.write(i, hex_value(hex.ptr().read(2*i))*16 + hex_value(hex.ptr().read(2*i+1))); });
 }
 same = (a: Ptr<u8>, b: Ptr<u8>, count: usize) bool {

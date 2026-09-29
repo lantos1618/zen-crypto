@@ -118,11 +118,11 @@ load32 = (input: Ptr<u8>, offset: usize) u32 {
     input.read(offset).to_u32() + input.read(offset + 1).to_u32() * 256
         + input.read(offset + 2).to_u32() * 65536 + input.read(offset + 3).to_u32() * 16777216
 }
-store = (output: Ptr<u8>, value: u64, count: usize) () {
+store = (output: Ptr<u8>, value: u64, count: usize) {
     word ::= value;
     Range(0, count).loop((i) { output.write(i, byte(word)); word = word / 256; });
 }
-quarter = (v: Ptr<u32>, a: usize, b: usize, c: usize, d: usize) () {
+quarter = (v: Ptr<u32>, a: usize, b: usize, c: usize, d: usize) {
     v.write(a, v.read(a) +% v.read(b));
     v.write(d, v.read(d).bit_xor(v.read(a)).rotate_right(16));
     v.write(c, v.read(c) +% v.read(d));
@@ -132,7 +132,7 @@ quarter = (v: Ptr<u32>, a: usize, b: usize, c: usize, d: usize) () {
     v.write(c, v.read(c) +% v.read(d));
     v.write(b, v.read(b).bit_xor(v.read(c)).rotate_right(25));
 }
-block = (scratch: Ptr<u64>, counter: u32) () {
+block = (scratch: Ptr<u64>, counter: u32) {
     v = scratch.to<u32>(); initial = scratch.offset(8).to<u32>();
     initial.write(12, counter);
     Range(0, 16).loop((i) { v.write(i, initial.read(i)); });
@@ -145,7 +145,7 @@ block = (scratch: Ptr<u64>, counter: u32) () {
     output = scratch.offset(16).to<u8>();
     Range(0, 16).loop((i) { store(output.offset(i * 4), (v.read(i) +% initial.read(i)).to_u64(), 4); });
 }
-initialize = (scratch: Ptr<u64>, key: Ptr<u8>, nonce: Ptr<u8>) () {
+initialize = (scratch: Ptr<u64>, key: Ptr<u8>, nonce: Ptr<u8>) {
     initial = scratch.offset(8).to<u32>();
     initial.write(0, 1634760805); initial.write(1, 857760878);
     initial.write(2, 2036477234); initial.write(3, 1797285236);
@@ -170,7 +170,7 @@ stream_xor = (
     output  : Ptr<u8>,
     input   : Ptr<u8>,
     count   : usize
-) () {
+) {
     offset: usize ::= 0; counter: u32 ::= 1;
     (offset < count).loop((loop) {
         block(scratch, counter);
@@ -190,7 +190,7 @@ stream_xor = (
 }
 // Five base-2^26 limbs modulo 2^130-5. Every block here is exactly16bytes:
 // AEAD pads the AAD and ciphertext separately before the length block.
-poly_block = (p: Ptr<u64>, input: Ptr<u8>) () {
+poly_block = (p: Ptr<u64>, input: Ptr<u8>) {
     h0 = p.read(5) + load32(input, 0).to_u64() % 67108864;
     h1 = p.read(6) + load32(input, 3).to_u64() / 4 % 67108864;
     h2 = p.read(7) + load32(input, 6).to_u64() / 16 % 67108864;
@@ -207,7 +207,7 @@ poly_block = (p: Ptr<u64>, input: Ptr<u8>) () {
     p.write(5, low % 67108864); p.write(6, d1 % 67108864 + low / 67108864);
     p.write(7, d2 % 67108864); p.write(8, d3 % 67108864); p.write(9, d4 % 67108864);
 }
-poly_padded = (p: Ptr<u64>, buffer: Ptr<u8>, input: Ptr<u8>, count: usize) () {
+poly_padded = (p: Ptr<u64>, buffer: Ptr<u8>, input: Ptr<u8>, count: usize) {
     offset: usize ::= 0;
     (count - offset >= 16).loop(
         (loop) { poly_block(p, input.offset(offset)); offset = offset + 16; }
@@ -218,7 +218,7 @@ poly_padded = (p: Ptr<u64>, buffer: Ptr<u8>, input: Ptr<u8>, count: usize) () {
         poly_block(p, buffer);
     });
 }
-poly_finish = (p: Ptr<u64>, output: Ptr<u8>) () {
+poly_finish = (p: Ptr<u64>, output: Ptr<u8>) {
     // Normalize, then select h or h-p using an arithmetic mask, never a
     // secret-dependent early exit. Compiler/architecture timing is not audited.
     h1 = p.read(6); h2 = p.read(7) + h1 / 67108864;
@@ -249,7 +249,7 @@ authenticate = (
     aad_count  : usize,
     ciphertext : Ptr<u8>,
     count      : usize
-) () {
+) {
     p = scratch.offset(24); buffer = scratch.offset(38).to<u8>();
     poly_padded(p, buffer, aad, aad_count); poly_padded(p, buffer, ciphertext, count);
     store(buffer, aad_count.to_u64(), 8); store(buffer.offset(8), count.to_u64(), 8);

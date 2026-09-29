@@ -65,7 +65,7 @@ blake2b_candidate* = (
     })
 }
 
-load_block = (words: Ptr<u64>, input: Ptr<u8>, count: usize) () {
+load_block = (words: Ptr<u64>, input: Ptr<u8>, count: usize) {
     Range(0, 16).loop((i) { words.write(i, 0); });
     factor: u64 ::= 1;
     Range(0, count).loop((i) {
@@ -75,7 +75,7 @@ load_block = (words: Ptr<u64>, input: Ptr<u8>, count: usize) () {
     });
 }
 
-mix = (v: Ptr<u64>, a: usize, b: usize, c: usize, d: usize, x: u64, y: u64) () {
+mix = (v: Ptr<u64>, a: usize, b: usize, c: usize, d: usize, x: u64, y: u64) {
     v.write(a, v.read(a) +% v.read(b) +% x);
     v.write(d, v.read(d).bit_xor(v.read(a)).rotate_right(32));
     v.write(c, v.read(c) +% v.read(d));
@@ -86,7 +86,7 @@ mix = (v: Ptr<u64>, a: usize, b: usize, c: usize, d: usize, x: u64, y: u64) () {
     v.write(b, v.read(b).bit_xor(v.read(c)).rotate_right(63));
 }
 
-compress = (h: Ptr<u64>, m: Ptr<u64>, v: Ptr<u64>, low: u64, high: u64, last: bool) () {
+compress = (h: Ptr<u64>, m: Ptr<u64>, v: Ptr<u64>, low: u64, high: u64, last: bool) {
     Range(0, 8).loop((i) { v.write(i, h.read(i)); v.write(i + 8, iv(i)); });
     v.write(12, v.read(12).bit_xor(low));
     v.write(13, v.read(13).bit_xor(high));
@@ -109,7 +109,7 @@ iv = (i: usize) u64 {
 }
 
 // The fixed public message schedule; no data-dependent lookup indices.
-round_mix = (v: Ptr<u64>, m: Ptr<u64>, round: usize) () {
+round_mix = (v: Ptr<u64>, m: Ptr<u64>, round: usize) {
     round.match({
         0 => {
             mix(v, 0, 4, 8, 12, m.read(0), m.read(1));

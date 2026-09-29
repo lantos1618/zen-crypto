@@ -3,7 +3,7 @@ sha256_candidate = sha256
 nibble = (
     byte : u8
 ) u8 { (byte <= 57).match({true => byte - 48, false => byte - 87}) }
-unhex = (out: Ptr<u8>, text: str) () { Range(0, text.len / 2).loop((i) { out.write(i, nibble(text.ptr().read(i * 2)) * 16 + nibble(text.ptr().read(i * 2 + 1))); }); }
+unhex = (out: Ptr<u8>, text: str) { Range(0, text.len / 2).loop((i) { out.write(i, nibble(text.ptr().read(i * 2)) * 16 + nibble(text.ptr().read(i * 2 + 1))); }); }
 same = (actual: Ptr<u8>, text: str) bool {
     good ::= true;
     Range(0, text.len / 2).loop((i) { good = good && actual.read(i) == nibble(text.ptr().read(i * 2)) * 16 + nibble(text.ptr().read(i * 2 + 1)); }); good

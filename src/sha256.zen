@@ -102,7 +102,7 @@ sha256_candidate* = (
     })
 }
 
-compress = (state: Ptr<u32>, block: Ptr<u8>) () {
+compress = (state: Ptr<u32>, block: Ptr<u8>) {
     w = state.offset(8);
     Range(0, 16).loop((i) {
         word: u32 ::= 0;

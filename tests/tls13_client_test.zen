@@ -18,7 +18,7 @@ AlignmentAlloc.impl(Alloc, {
         allocated = self.base.raw(pointer.bytes(count) + 1, 8).try();
         self.odd.write(0, allocated.offset(1)); Ok(allocated.offset(1).to<T>())
     }
-    free = <T>(self: @Self, pointer: Ptr<T>) () {
+    free = <T>(self: @Self, pointer: Ptr<T>) {
         pointer.to<u8>().same(self.odd.read(0)).match({true => self.base.free(pointer.to<u8>().back(1)), false => self.base.free(pointer)});
     }
 })

@@ -3,7 +3,7 @@
 // The native runner appends this test to a temporary copy of the module so its
 // private arithmetic can be checked without exporting a raw authenticator API.
 edge_nibble = (b:u8) u8 { (b<=57).match({true=>b-48,false=>b-87}) }
-edge_decode = (out:Ptr<u8>, text:str) () {
+edge_decode = (out:Ptr<u8>, text:str) {
     Range(0, text.len/2).loop((i) { out.write(i, edge_nibble(text.ptr().read(2*i))*16+edge_nibble(text.ptr().read(2*i+1))); });
 }
 edge_case = (
