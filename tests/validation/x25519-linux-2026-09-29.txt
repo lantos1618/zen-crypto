@@ -1,0 +1,51 @@
+Published native X25519 Linux validation, 2026-09-29
+
+Public source revisions:
+  zen-crypto: 96ec04283c9d680557ced9dbdbe2680f77ae63ba
+  zen compiler/std: 6494242457685b3bf0ada430edc812414fe0bc22
+  Crypto checkout was clean before fetching public main and fast-forwarding.
+
+Environment:
+  Linux 6.8.0-139-generic x86_64 GNU/Linux
+  Ubuntu Clang 18.1.3 (1ubuntu1)
+  Python 3.12.3; cryptography 41.0.7 (test reference only)
+  Isolated workspace: /home/ubuntu/zen-native-crypto-validation-20260928
+  Existing compiler: zen/build/bootstrap/zen-seed, built from the published
+  C seed using make build/bootstrap/zen-seed CC=clang CFLAGS='-O2 -std=c99'.
+  Matching standard library: zen/src
+  SHA256 compiler binary:
+    962f1d95654887ece7f7ae8c19de622b49b9f921544518822fd0e18d78e4d928
+  SHA256 seed/zen.c:
+    b5477f414481cbbf6090dc707bb59e302487c3d40d948013505cb36d8c5cf5ab
+
+Commands, from zen-crypto:
+  root=/home/ubuntu/zen-native-crypto-validation-20260928
+  export ZEN_COMPILER="$root/zen/build/bootstrap/zen-seed"
+  export ZEN_STD="$root/zen/src"
+  python3 scripts/check-x25519.py
+  "$ZEN_COMPILER" build test-x25519
+  ./build/test-x25519
+
+All commands exited 0.
+  O3 and UBSan (-O2 -fsanitize=undefined -fno-sanitize-recover=all) passed:
+    252 successful RFC/independent-reference vectors, each in five output
+      alias modes;
+    14 rejected low-order/noncanonical inputs, each in three alias modes;
+    11 invalid-argument cases;
+    scalar clamping and public-coordinate masking/canonicalization;
+    RFC 7748 one- and 1,000-iteration known answers.
+  The standalone project target passed its RFC/alias/bounds/rejection and
+    one-/1,000-iteration vectors.
+  Wrong Montgomery constant negative control was rejected.
+  No external crypto symbols were linked into the checked native executable.
+
+Remote logs under the isolated workspace:
+  x25519-environment.txt
+  x25519-linux-differential.log
+  x25519-linux-standalone-build.log
+  x25519-linux-standalone.log
+Local ignored summary logs: build/linux-native-validation/x25519/
+
+Scope: functional and undefined-behavior regression checks. The million-
+iteration vector was not run. This is not a security audit, a proof of
+constant-time behavior, a secure-erasure guarantee or a performance claim.
