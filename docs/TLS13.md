@@ -129,6 +129,12 @@ same idempotent cleanup as the blocking API. Invalid caller arguments are
 nonterminal. Caller-owned buffers and already delivered plaintext remain the
 caller's responsibility.
 
+The record-progress revision passes the existing TLS suites on macOS and Linux,
+plus independent byte-fed tests and native HTTP regressions. Linux engine and
+HTTP checks also pass with ASan and UBSan. [Exact revisions, commands and
+limitations](../tests/validation/tls13-record-progress-2026-09-29.txt) distinguish
+simulated progress from future socket-adapter coverage.
+
 ## Primitive and record APIs
 
 SHA-256 uses 72 aligned u32 scratch words and a 64-byte block. HMAC requires

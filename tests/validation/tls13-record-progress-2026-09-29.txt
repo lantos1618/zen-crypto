@@ -1,0 +1,52 @@
+Native TLS resumable application-record validation — 2026-09-29
+
+Production/test revision: zen-crypto 81189a699d38ee929a4a08d87e1ffde10ac52d2f
+Compiler/std: b2b318849cde58169292fe12a2969cf339fc6546
+Session source SHA256: 34aea1c77383b241a4c314181b7562629a5303c56a9edea7080f2158e9bc28e3
+
+macOS arm64:
+  Full pre-existing scripts/check-tls13.sh stages: PASS under UBSan.
+  Final scripts/check-tls13-record-engine.py: PASS under UBSan.
+  zen-http scripts/check-native-http.py: PASS under UBSan, with
+    -Werror=parentheses-equality replacing the previous suppression.
+  Logs: /tmp/zen-tls-progress-full-mac.log,
+    /tmp/zen-tls-record-engine-mac.log, /tmp/zen-tls-progress-http-mac.log.
+
+Linux x86_64 (dev-box, Clang 18.1.3, Python 3.12.3):
+  Isolated workspace: ~/zen-tls-progress-opX2tO
+  Compiler: ~/zen-native-crypto-validation-20260928/zen-remove-std-http/build/bootstrap/zen-seed
+  STD: ~/zen-native-crypto-validation-20260928/zen-remove-std-http/src
+  OPENSSL reference: ~/zen-readiness-http-validation-20260928/zen-http/build/openssl/bin/openssl
+  Full pre-existing scripts/check-tls13.sh stages: PASS under UBSan.
+  SANITIZERS=address,undefined python3 scripts/check-tls13-record-engine.py: PASS.
+  SANITIZERS=address,undefined python3 scripts/check-native-http.py: PASS.
+  Both engine and HTTP executables contain __asan_init and
+    __ubsan_handle_type_mismatch_v1_abort definitions.
+  Logs: full-linux.log, record-engine-linux.log, native-http-linux.log under
+    the isolated workspace. Source was staged before publication; its SHA256
+    matches the published revision above.
+
+Coverage:
+  Existing schedule/record vectors; fragmented and hostile handshake peers;
+  PSK-only and PSK-DHE; OpenSSL interoperability; native-to-native server/client;
+  reusable blocking sessions, 50KB transfers, partial reads and authenticated close.
+  New deterministic engine: Python ChaCha20-Poly1305 oracle; bytewise input and
+  acknowledgements, zero-progress retries, pending-output stability during reads,
+  coalesced-record boundaries, empty records, close preserving pending output,
+  invalid arguments, 27 mutation positions and 27 EOF cuts. Ciphertext/tag
+  mutations must return Authentication immediately. Both directions reject the
+  reserved maximum sequence number. A staged bug advancing sending sequence on
+  every partial acknowledgement is rejected by the oracle.
+  Native HTTP: 207 parser split cases, 8 parser rejection cases and 8 encrypted
+  exchange cases including framing, tampering, truncation and insecure URL refusal.
+  New generated engine/HTTP test builds reject parentheses-equality warnings.
+  Symbol checks find no OpenSSL/libsodium crypto calls in native test binaries.
+
+Limits:
+  These byte-fed tests simulate retry/no-progress; no actual OS EAGAIN/EINTR
+  driver or resumable handshake is supplied. Default HTTP server transport
+  remains OpenSSL. No certificate authentication, browser HTTPS, native ALPN,
+  HTTP/2 negotiation, security audit or performance claim follows.
+  Allocation accounting verifies exactly-once free calls (112 in main engine
+  fixture, 4 at sequence exhaustion). The fixture uses an arena; these counts
+  are not proof of per-allocation heap release or compiler-resistant erasure.
