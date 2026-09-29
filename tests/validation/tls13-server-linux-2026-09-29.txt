@@ -1,0 +1,107 @@
+Native PSK-DHE TLS server Linux validation, 2026-09-29
+
+Published revisions
+  zen-crypto: ba29487346be89dc299e870bdee64941d957bed6
+    https://github.com/lantos1618/zen-crypto/commit/ba29487346be89dc299e870bdee64941d957bed6
+  compiler/std: f506c9cbf22cf1c2367f5be78d642aac27c81e92
+    https://github.com/lantos1618/zen/commit/f506c9cbf22cf1c2367f5be78d642aac27c81e92
+  Compiler binary: zen/build/bootstrap/zen-seed
+  SHA-256: a7ff87fdb092ca8f3baf6ed220960e89e037882d0a067ab145b0f4f332854986
+  Crypto was fetched from public main and fast-forwarded only after checking
+  the isolated checkout was clean. No production source copies or patches.
+
+Environment
+  /home/ubuntu/zen-native-crypto-validation-20260928
+  Linux 6.8.0-139-generic x86_64, Ubuntu Clang 18.1.3 (1ubuntu1)
+  Python 3.12.3 and cryptography 41.0.7 (test reference only)
+  OpenSSL 3.5.4 (30 Sep 2025), test peer only
+
+Full published TLS suite, executed from zen-crypto
+  ZEN_COMPILER=../zen/build/bootstrap/zen-seed \
+  ZEN_STD=../zen/src PYTHON=python3 CC=clang \
+  OPENSSL=/home/ubuntu/zen-http-validation-20260928-1952/zen-http/build/openssl/bin/openssl \
+  scripts/check-tls13.sh
+
+Server-only ASan + UBSan command
+  The ignored compiler wrapper tls-session-asan-cc contains:
+    #!/bin/sh
+    exec clang -fsanitize=address "$@"
+  The published runner adds -fsanitize=undefined -fno-sanitize-recover=all.
+
+  ZEN_COMPILER=../zen/build/bootstrap/zen-seed \
+  ZEN_STD=../zen/src \
+  CC=/home/ubuntu/zen-native-crypto-validation-20260928/tls-session-asan-cc \
+  OPENSSL=/home/ubuntu/zen-http-validation-20260928-1952/zen-http/build/openssl/bin/openssl \
+  python3 scripts/check-tls13-server.py
+
+Results
+  Full published TLS suite: exit 0, UBSan enabled by its runners.
+  Server-only ASan+UBSan suite: exit 0.
+  Both final native server and client executables contained __asan_init and
+  __ubsan_handle_type_mismatch_v1_abort. No sanitizer failure was reported.
+  The runner's fixed summary says UBSan; ASan was verified independently.
+  The isolated compiler and crypto tracked checkouts remained clean.
+
+Server outcomes in both runs
+  PASS native server independent valid
+  PASS native server independent wrong-psk
+  PASS native server independent bad-binder
+  PASS native server independent duplicate
+  PASS native server independent low-order
+  PASS native server independent low-order-one
+  PASS native server independent short-share
+  PASS native server independent early-data
+  PASS native server independent truncated-hello
+  PASS native server independent psk-only
+  PASS native server independent wrong-identity
+  PASS native server independent psk-not-last
+  PASS native server independent cookie
+  PASS native server independent share-order
+  PASS native server independent duplicate-ignored
+  PASS native server independent group-limit
+  PASS native server independent extension-limit
+  PASS native server independent oversized-record
+  PASS native server independent early-application
+  PASS native server independent wrong-finished
+  PASS native server independent replay
+  PASS native server independent truncated-finished
+  PASS OpenSSL s_client to native server: X25519, 50000 bytes, close_notify
+  PASS native client to native server: 50000 bytes, partial reads, close_notify
+  PASS native-only symbols, aligned cleanup and private input preservation
+
+The full suite also passed independent PSK/DHE schedules, invalid-input and
+padding-boundary vectors, the deliberately wrong TLS-label control, legacy
+PSK/client interoperability and alignment controls, reusable-session negative
+cases, and client-side DHE interoperability. ASan was applied to the separate
+server runner, not every component of the full-suite run.
+
+What the server checks demonstrate
+  - Independent Python verifies the server X25519 share, transcript, Finished
+    and encrypted response using cryptography/HMAC test references.
+  - Invalid ClientHello cases cannot provoke a server handshake flight;
+    invalid client Finished/application-before-Finished cases cannot cause
+    application data to be sent. Rejected calls preserve caller output.
+  - OpenSSL s_client and the native client both receive a 50000-byte response
+    over four records and authenticate close_notify; partial reads are tested.
+  - Both directional traffic keys/sequences are exercised by independent and
+    native peers. No external crypto backend calls appear in native symbols.
+  - Null private input and private bytes equal to public random are rejected
+    before allocation/I/O. Caller private inputs remain unchanged.
+  - Two aligned allocations are released exactly once on success/refusal.
+
+Transport boundary
+  The Zen fixture connects TCP to the Python harness, then acts as TLS server.
+  OpenSSL/native-client runs use a byte-only relay between connected sockets.
+  These are real TLS server-role handshakes; they do not validate a native
+  bind/listen/accept API or an HTTP listener integration.
+
+Retained files under the isolated root
+  tls-server-fetch.log, tls-server-environment.txt, tls-server-provenance.txt
+  tls-server-full.log, tls-server-full.exit
+  tls-server-asan.log, tls-server-asan.exit
+
+Limitations
+  Narrow external-PSK X25519 profile only: no PKI, hostname validation, HRR,
+  ALPN, HTTP/2 negotiation, or general HTTPS interoperability claim.
+  Sanitizers and peer agreement are not a security audit, constant-time proof,
+  guaranteed secure erasure, full compiler aggregate result, or benchmark.

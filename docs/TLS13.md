@@ -243,5 +243,10 @@ The final expanded server runner separately passes 22 independent client cases,
 OpenSSL `s_client`, and the native-to-native path under UBSan. The additional
 cases cover application data before Finished, duplicate ignored extensions,
 share/group ordering, cookies, PSK-last placement, and parser size limits.
-Linux server validation remains pending; the earlier Linux evidence above
-covers the client/session implementations.
+At public crypto `ba29487` with merged compiler/std `f506c9cb`, the complete
+TLS suite also passes on Linux x86_64. A separate native-server run passes all
+22 independent client cases, OpenSSL `s_client`, and the native-to-native path
+with both ASan and UBSan enabled. Sanitizer symbols were checked in both native
+executables. [Exact revisions, commands, transport boundary and limitations](../tests/validation/tls13-server-linux-2026-09-29.txt)
+record this server-role validation. It does not claim listener or HTTP integration
+coverage beyond these TLS endpoints.
