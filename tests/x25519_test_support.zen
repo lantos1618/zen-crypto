@@ -21,14 +21,27 @@ Harness* = {
             Range(0, 200).loop((i) { self.bytes.write(i, 165); });
             decode(key, key_hex); decode(peer, peer_hex);
             self.words.write(0, 123456789); self.words.write(353, 987654321);
-            out = mode.match({0 => output, 1 => key, 2 => peer, 3 => key.offset(1), _ => peer.offset(1)});
+            out    = mode.match({0 => output, 1 => key, 2 => peer, 3 => key.offset(1), _ => peer.offset(1)});
             result = public.match({
-                true => x25519_public_key(out, 32, key, self.words.offset(1), 352),
-                false => x25519_shared_secret(out, 32, key, peer, self.words.offset(1), 352),
+                true  => x25519_public_key(
+                    out,
+                    32,
+                    key,
+                    self.words.offset(1),
+                    352
+                ),
+                false => x25519_shared_secret(
+                    out,
+                    32,
+                    key,
+                    peer,
+                    self.words.offset(1),
+                    352
+                ),
             });
-            good = result && matches(out, expected) && good;
-            good = self.words.read(0) == 123456789 && self.words.read(353) == 987654321 && good;
-            good = self.bytes.read(0) == 165 && self.bytes.read(64) == 165
+            good   = result && matches(out, expected) && good;
+            good   = self.words.read(0) == 123456789 && self.words.read(353) == 987654321 && good;
+            good   = self.bytes.read(0) == 165 && self.bytes.read(64) == 165
                 && ((mode == 4) || self.bytes.read(97) == 165) && self.bytes.read(98) == 165 && self.bytes.read(128) == 165
                 && self.bytes.read(161) == 165 && good;
         });
@@ -41,8 +54,15 @@ Harness* = {
         Range(0, 3).loop((mode) {
             decode(key, key_hex); decode(peer, peer_hex);
             Range(0, 32).loop((i) { output.write(i, 165); });
-            out = mode.match({0 => output, 1 => key, _ => peer});
-            good = !x25519_shared_secret(out, 32, key, peer, self.words.offset(1), 352) && good;
+            out  = mode.match({0 => output, 1 => key, _ => peer});
+            good = !x25519_shared_secret(
+                out,
+                32,
+                key,
+                peer,
+                self.words.offset(1),
+                352
+            ) && good;
             good = matches(key, key_hex) && matches(peer, peer_hex) && good;
             Range(0, 32).loop((i) { good = output.read(i) == 165 && good; });
         });
@@ -62,7 +82,14 @@ Harness* = {
             && !x25519_shared_secret(output, 31, key, peer, s, 352)
             && !x25519_shared_secret(output, 32, null_ptr<u8>(), peer, s, 352)
             && !x25519_shared_secret(output, 32, key, null_ptr<u8>(), s, 352)
-            && !x25519_shared_secret(output, 32, key, peer, null_ptr<u64>(), 352)
+            && !x25519_shared_secret(
+                output,
+                32,
+                key,
+                peer,
+                null_ptr<u64>(),
+                352
+            )
             && !x25519_shared_secret(output, 32, key, peer, s, 351);
         Range(0, 200).loop((i) { good = self.bytes.read(i) == 165 && good; });
         Range(0, 354).loop((i) { good = self.words.read(i) == 12345 && good; });
@@ -75,10 +102,25 @@ Harness* = {
         key.write(0, 9); peer.write(0, 9);
         good ::= true;
         Range(0, 1000).loop((step) {
-            good = x25519_shared_secret(output, 32, key, peer, self.words.offset(1), 352) && good;
+            good = x25519_shared_secret(
+                output,
+                32,
+                key,
+                peer,
+                self.words.offset(1),
+                352
+            ) && good;
             peer.copy_from(key, 32); key.copy_from(output, 32);
-            (step == 0).then(() { good = matches(key, "422c8e7a6227d7bca1350b3e2bb7279f7897b87bb6854b783c60e80311ae3079") && good; });
+            (step == 0).then(
+                () { good = matches(
+                    key,
+                    "422c8e7a6227d7bca1350b3e2bb7279f7897b87bb6854b783c60e80311ae3079"
+                ) && good; }
+            );
         });
-        matches(key, "684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51") && good
+        matches(
+            key,
+            "684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51"
+        ) && good
     }
 }

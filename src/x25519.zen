@@ -10,12 +10,15 @@ Range = std.core
 bit_xor, to_u64, to_usize, to_u8 = std.core.num
 
 x25519_public_key* = (
-    output: Ptr<u8>, capacity: usize, private_key: Ptr<u8>,
-    scratch: Ptr<u64>, scratch_words: usize
+    output        : Ptr<u8>,
+    capacity      : usize,
+    private_key   : Ptr<u8>,
+    scratch       : Ptr<u64>,
+    scratch_words : usize
 ) bool {
     valid(output, capacity, private_key, scratch, scratch_words).match({
         false => false,
-        true => {
+        true  => {
             constant(scratch, 9);
             evaluate(output, private_key, scratch)
         },
@@ -23,19 +26,35 @@ x25519_public_key* = (
 }
 
 x25519_shared_secret* = (
-    output: Ptr<u8>, capacity: usize, private_key: Ptr<u8>, peer_public: Ptr<u8>,
-    scratch: Ptr<u64>, scratch_words: usize
+    output        : Ptr<u8>,
+    capacity      : usize,
+    private_key   : Ptr<u8>,
+    peer_public   : Ptr<u8>,
+    scratch       : Ptr<u64>,
+    scratch_words : usize
 ) bool {
-    (valid(output, capacity, private_key, scratch, scratch_words) && !peer_public.is_null()).match({
+    (valid(
+        output,
+        capacity,
+        private_key,
+        scratch,
+        scratch_words
+    ) && !peer_public.is_null()).match({
         false => false,
-        true => {
+        true  => {
             decode(scratch, peer_public);
             evaluate(output, private_key, scratch)
         },
     })
 }
 
-valid = (out: Ptr<u8>, capacity: usize, key: Ptr<u8>, scratch: Ptr<u64>, words: usize) bool {
+valid = (
+    out      : Ptr<u8>,
+    capacity : usize,
+    key      : Ptr<u8>,
+    scratch  : Ptr<u64>,
+    words    : usize
+) bool {
     !out.is_null() && capacity >= 32 && !key.is_null() && !scratch.is_null() && words >= 352
 }
 byte = (value: u64) u8 { value.to_usize().value_or(0).to_u8().value_or(0) }
@@ -114,12 +133,14 @@ swap = (a: Ptr<u64>, b: Ptr<u64>, bit: u64) {
 decode = (out: Ptr<u64>, input: Ptr<u8>) {
     constant(out, 0);
     Range(0, 32).loop((i) {
-        value = input.read(i).to_u64();
+        value  = input.read(i).to_u64();
         masked = (i == 31).match({true => value % 128, false => value});
-        limb = i * 8 / 15;
-        n = masked * power(i * 8 % 15);
+        limb   = i * 8 / 15;
+        n      = masked * power(i * 8 % 15);
         out.write(limb, out.read(limb) + n % 32768);
-        (limb < 16).then(() { out.write(limb + 1, out.read(limb + 1) + n / 32768); });
+        (limb < 16).then(
+            () { out.write(limb + 1, out.read(limb + 1) + n / 32768); }
+        );
     });
     reduce(out);
 }
@@ -145,8 +166,8 @@ evaluate = (output: Ptr<u8>, private_key: Ptr<u8>, s: Ptr<u64>) bool {
     constant(x2, 1); constant(z2, 0); copy(x3, x1); constant(z3, 1);
     previous: u64 ::= 0;
     Range(0, 255).loop((step) {
-        t = 254 - step;
-        bit = scalar.read(t / 8).to_u64() / power(t % 8) % 2;
+        t      = 254 - step;
+        bit    = scalar.read(t / 8).to_u64() / power(t % 8) % 2;
         choice = previous.bit_xor(bit);
         swap(x2, x3, choice); swap(z2, z3, choice); previous = bit;
         add(a, x2, z2); multiply(aa, a, a, work);
@@ -165,7 +186,9 @@ evaluate = (output: Ptr<u8>, private_key: Ptr<u8>, s: Ptr<u64>) bool {
     Range(0, 255).loop((step) {
         bit = 254 - step;
         multiply(inverse, inverse, inverse, work);
-        (bit != 2 && bit != 4).then(() { multiply(inverse, inverse, z2, work); });
+        (bit != 2 && bit != 4).then(
+            () { multiply(inverse, inverse, z2, work); }
+        );
     });
     multiply(temp, x2, inverse, work);
     encode(result, temp);
@@ -173,6 +196,6 @@ evaluate = (output: Ptr<u8>, private_key: Ptr<u8>, s: Ptr<u64>) bool {
     Range(0, 32).loop((i) { nonzero = nonzero + result.read(i).to_u64(); });
     (nonzero != 0).match({
         false => false,
-        true => { output.copy_from(result, 32); true },
+        true  => { output.copy_from(result, 32); true },
     })
 }
