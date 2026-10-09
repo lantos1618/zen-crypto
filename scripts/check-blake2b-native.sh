@@ -27,9 +27,9 @@ print('Standalone undefined symbols: no sodium/OpenSSL/BLAKE2 references')
 
 # Mutate a generated-C copy only. A one-bit IV error must fail known answers.
 source = Path('build/blake2b_native_test.c').read_text()
-original = 'return 7640891576956012808;'
-assert source.count(original) == 1, 'Expected exactly one first BLAKE2b IV return'
-mutated = source.replace(original, 'return 7640891576956012809;', 1)
+original = '7640891576956012808'
+assert source.count(original) == 1, 'Expected exactly one first BLAKE2b IV constant'
+mutated = source.replace(original, '7640891576956012809', 1)
 Path('build/blake2b_negative_control.c').write_text(mutated)
 PY
 ${CC:-clang} -O2 -fsanitize=undefined -fno-sanitize-recover=all \

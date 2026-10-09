@@ -61,7 +61,7 @@ append = (
 be24 = (p: Ptr<u8>) usize { p.read(0).to_usize() * 65536 + p.read(1).to_usize() * 256 + p.read(2).to_usize() }
 equal = (a: Ptr<u8>, b: Ptr<u8>, count: usize) bool {
     different: usize ::= 0;
-    Range(0, count).loop((i) { different = different + (a.read(i) == b.read(i)).match({true => 0, false => 1}); });
+    Range(0, count).loop((i) { different = different +% (a.read(i) == b.read(i)).match({true => 0, false => 1}); });
     different == 0
 }
 hash = (

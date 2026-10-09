@@ -68,7 +68,7 @@ hash = (
 // Full-length comparison; generated code has not had a side-channel audit.
 equal32 = (left: Ptr<u8>, right: Ptr<u8>) bool {
     differences: usize ::= 0;
-    Range(0, 32).loop((i) { differences = differences + (left.read(i) == right.read(i)).match({true => 0, false => 1}); });
+    Range(0, 32).loop((i) { differences = differences +% (left.read(i) == right.read(i)).match({true => 0, false => 1}); });
     differences == 0
 }
 server_hello = (message: Ptr<u8>, count: usize, dhe: bool, peer_public: Ptr<u8>) Res<(), Tls13ClientError

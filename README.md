@@ -66,8 +66,10 @@ ZEN_STD=/path/to/zen/src /path/to/zen/zen build test-blake2b
 build/test-blake2b
 ```
 
-The normal checks build comparison, BLAKE2b, SHA-256/HMAC/HKDF and
+The normal checks build comparison, BLAKE2b, SHA-256/HMAC/HKDF,
 ChaCha20-Poly1305 and X25519 without external crypto headers or libraries.
+The ChaCha20-Poly1305 check also compares 1,080 seal/open cases against Python
+`cryptography`, including tampered tags that must leave output unchanged.
 The BLAKE2b standalone check runs nine known answers,
 inspects unresolved symbols and rejects a deliberate IV-bitflip negative control.
 `CC` and `PYTHON` can override the BLAKE2b test toolchain. Defaults use a sibling

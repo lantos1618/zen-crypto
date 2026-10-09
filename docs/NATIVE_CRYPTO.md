@@ -21,6 +21,16 @@ boundaries, maximum HKDF output, altered tags and failure-before-output behavior
 These results do not establish portable constant-time behavior or production
 security. [TLS scope and commands](TLS13.md).
 
+Poly1305 uses bounded wrapping arithmetic so generated code does not add
+checked-overflow branches to secret-limb operations. A Linux x86_64 Clang
+`-O2` Valgrind secret-key taint probe of native AEAD sealing reported no
+conditional-branch or address warnings, and an `-O3` assembly scan found no
+hardware division. The default check now also compares 1,080 seal/open and
+tamper cases against Python `cryptography`. These are focused checks, not a
+constant-time or independent security certification.
+The client Finished and server binder/Finished comparisons scan every byte
+and use bounded wrapping counters to avoid checked-overflow branches.
+
 ## Remaining order of work
 
 1. BLAKE2b streaming API and performance measurements; one-shot keyed/unkeyed
@@ -81,6 +91,9 @@ known-answer checks detect a deliberately broken algorithm.
 
 The optimized arm64 assembly contains native XOR and rotate instructions. This
 spot check confirms native lowering; it is not a complete constant-time review.
+Keyed byte packing uses bounded wrapping arithmetic; a Linux x86_64 Clang
+`-O2` Valgrind secret-key taint probe reported no branch or address warnings
+for a 32-byte key and message. This checks one input shape and toolchain.
 No timing-statistics study, independent security audit or comparative performance
 benchmark is claimed. Tests do not exercise the full 128-bit counter range with
 physically enormous inputs. The first release uses a 64-bit compiler target.
