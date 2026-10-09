@@ -191,20 +191,21 @@ stream_xor = (
 // Five base-2^26 limbs modulo 2^130-5. Every block here is exactly16bytes:
 // AEAD pads the AAD and ciphertext separately before the length block.
 poly_block = (p: Ptr<u64>, input: Ptr<u8>) {
-    h0 = p.read(5) + load32(input, 0).to_u64() % 67108864;
-    h1 = p.read(6) + load32(input, 3).to_u64() / 4 % 67108864;
-    h2 = p.read(7) + load32(input, 6).to_u64() / 16 % 67108864;
-    h3 = p.read(8) + load32(input, 9).to_u64() / 64 % 67108864;
-    h4 = p.read(9) + load32(input, 12).to_u64() / 256 + 16777216;
+    h0 = p.read(5) +% load32(input, 0).to_u64() % 67108864;
+    h1 = p.read(6) +% load32(input, 3).to_u64() / 4 % 67108864;
+    h2 = p.read(7) +% load32(input, 6).to_u64() / 16 % 67108864;
+    h3 = p.read(8) +% load32(input, 9).to_u64() / 64 % 67108864;
+    h4 = p.read(9) +% load32(input, 12).to_u64() / 256 +% 16777216;
     r0 = p.read(0); r1 = p.read(1); r2 = p.read(2); r3 = p.read(3); r4 = p.read(4);
-    // Products/sums fit u64 (each limb <2^27, each r <2^26).
-    d0  = h0*r0 + 5*(h1*r4 + h2*r3 + h3*r2 + h4*r1);
-    d1  = h0*r1 + h1*r0 + 5*(h2*r4 + h3*r3 + h4*r2) + d0 / 67108864;
-    d2  = h0*r2 + h1*r1 + h2*r0 + 5*(h3*r4 + h4*r3) + d1 / 67108864;
-    d3  = h0*r3 + h1*r2 + h2*r1 + h3*r0 + 5*h4*r4 + d2 / 67108864;
-    d4  = h0*r4 + h1*r3 + h2*r2 + h3*r1 + h4*r0 + d3 / 67108864;
-    low = d0 % 67108864 + 5*(d4 / 67108864);
-    p.write(5, low % 67108864); p.write(6, d1 % 67108864 + low / 67108864);
+    // Products/sums fit u64 (each limb <2^27, each r <2^26); wrapping
+    // spelling avoids secret-dependent overflow checks in generated code.
+    d0  = h0*%r0 +% 5*%(h1*%r4 +% h2*%r3 +% h3*%r2 +% h4*%r1);
+    d1  = h0*%r1 +% h1*%r0 +% 5*%(h2*%r4 +% h3*%r3 +% h4*%r2) +% d0 / 67108864;
+    d2  = h0*%r2 +% h1*%r1 +% h2*%r0 +% 5*%(h3*%r4 +% h4*%r3) +% d1 / 67108864;
+    d3  = h0*%r3 +% h1*%r2 +% h2*%r1 +% h3*%r0 +% 5*%h4*%r4 +% d2 / 67108864;
+    d4  = h0*%r4 +% h1*%r3 +% h2*%r2 +% h3*%r1 +% h4*%r0 +% d3 / 67108864;
+    low = d0 % 67108864 +% 5*%(d4 / 67108864);
+    p.write(5, low % 67108864); p.write(6, d1 % 67108864 +% low / 67108864);
     p.write(7, d2 % 67108864); p.write(8, d3 % 67108864); p.write(9, d4 % 67108864);
 }
 poly_padded = (p: Ptr<u64>, buffer: Ptr<u8>, input: Ptr<u8>, count: usize) {
@@ -221,25 +222,25 @@ poly_padded = (p: Ptr<u64>, buffer: Ptr<u8>, input: Ptr<u8>, count: usize) {
 poly_finish = (p: Ptr<u64>, output: Ptr<u8>) {
     // Normalize, then select h or h-p using an arithmetic mask, never a
     // secret-dependent early exit. Compiler/architecture timing is not audited.
-    h1 = p.read(6); h2 = p.read(7) + h1 / 67108864;
-    h3 = p.read(8) + h2 / 67108864; h4 = p.read(9) + h3 / 67108864;
-    h0 = p.read(5) + 5*(h4 / 67108864);
-    p.write(5, h0 % 67108864); p.write(6, h1 % 67108864 + h0 / 67108864);
+    h1 = p.read(6); h2 = p.read(7) +% h1 / 67108864;
+    h3 = p.read(8) +% h2 / 67108864; h4 = p.read(9) +% h3 / 67108864;
+    h0 = p.read(5) +% 5*%(h4 / 67108864);
+    p.write(5, h0 % 67108864); p.write(6, h1 % 67108864 +% h0 / 67108864);
     p.write(7, h2 % 67108864); p.write(8, h3 % 67108864); p.write(9, h4 % 67108864);
-    g0 = p.read(5) + 5; g1 = p.read(6) + g0 / 67108864;
-    g2 = p.read(7) + g1 / 67108864; g3 = p.read(8) + g2 / 67108864;
-    g4      = (p.read(9) + g3 / 67108864) -% 67108864;
+    g0 = p.read(5) +% 5; g1 = p.read(6) +% g0 / 67108864;
+    g2 = p.read(7) +% g1 / 67108864; g3 = p.read(8) +% g2 / 67108864;
+    g4      = (p.read(9) +% g3 / 67108864) -% 67108864;
     mask    = (g4 / 9223372036854775808) -% 1;
     inverse = mask.bit_xor(18446744073709551615);
-    p.write(5, (g0 % 67108864).bit_and(mask) + p.read(5).bit_and(inverse));
-    p.write(6, (g1 % 67108864).bit_and(mask) + p.read(6).bit_and(inverse));
-    p.write(7, (g2 % 67108864).bit_and(mask) + p.read(7).bit_and(inverse));
-    p.write(8, (g3 % 67108864).bit_and(mask) + p.read(8).bit_and(inverse));
-    p.write(9, g4.bit_and(mask) + p.read(9).bit_and(inverse));
-    f0 = (p.read(5) + p.read(6)*67108864) % 4294967296 + p.read(10);
-    f1 = (p.read(6)/64 + p.read(7)*1048576) % 4294967296 + p.read(11) + f0/4294967296;
-    f2 = (p.read(7)/4096 + p.read(8)*16384) % 4294967296 + p.read(12) + f1/4294967296;
-    f3 = (p.read(8)/262144 + p.read(9)*256) % 4294967296 + p.read(13) + f2/4294967296;
+    p.write(5, (g0 % 67108864).bit_and(mask) +% p.read(5).bit_and(inverse));
+    p.write(6, (g1 % 67108864).bit_and(mask) +% p.read(6).bit_and(inverse));
+    p.write(7, (g2 % 67108864).bit_and(mask) +% p.read(7).bit_and(inverse));
+    p.write(8, (g3 % 67108864).bit_and(mask) +% p.read(8).bit_and(inverse));
+    p.write(9, g4.bit_and(mask) +% p.read(9).bit_and(inverse));
+    f0 = (p.read(5) +% p.read(6)*%67108864) % 4294967296 +% p.read(10);
+    f1 = (p.read(6)/64 +% p.read(7)*%1048576) % 4294967296 +% p.read(11) +% f0/4294967296;
+    f2 = (p.read(7)/4096 +% p.read(8)*%16384) % 4294967296 +% p.read(12) +% f1/4294967296;
+    f3 = (p.read(8)/262144 +% p.read(9)*%256) % 4294967296 +% p.read(13) +% f2/4294967296;
     store(output, f0, 4); store(output.offset(4), f1, 4);
     store(output.offset(8), f2, 4); store(output.offset(12), f3, 4);
 }

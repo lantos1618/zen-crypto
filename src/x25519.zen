@@ -7,7 +7,7 @@
 // afterward. Invalid arguments and all-zero shared secrets leave output unchanged.
 Ptr = std.mem
 Range = std.core
-bit_xor, to_u64, to_usize, to_u8 = std.core.num
+bit_xor, shift_right, to_u64, to_usize, to_u8 = std.core.num
 
 x25519_public_key* = (
     output        : Ptr<u8>,
@@ -76,35 +76,37 @@ copy = (out: Ptr<u64>, input: Ptr<u64>) {
 // limbs by 19 remains <2^39. Three fixed carry passes suffice: after pass 1
 // only limb 0 is unnormalized; pass 2 has top carry <=1; if it is 1 all
 // intervening limbs have wrapped, so pass 3 cannot produce another top carry.
+// Wrapping operators avoid secret-dependent overflow checks; these bounds
+// mean they have the same result as checked arithmetic for valid field values.
 reduce = (v: Ptr<u64>) {
     Range(0, 3).loop((_) {
         carry: u64 ::= 0;
         Range(0, 17).loop((i) {
-            n = v.read(i) + carry;
+            n = v.read(i) +% carry;
             v.write(i, n % 32768);
             carry = n / 32768;
         });
-        v.write(0, v.read(0) + carry * 19);
+        v.write(0, v.read(0) +% carry *% 19);
     });
     // v + 19 overflows 255 bits precisely when v >= p. Add 19 only then,
     // discarding that final carry, equivalent to subtraction of p.
     carry: u64 ::= 19;
-    Range(0, 17).loop((i) { carry = (v.read(i) + carry) / 32768; });
-    carry = carry * 19;
+    Range(0, 17).loop((i) { carry = (v.read(i) +% carry) / 32768; });
+    carry = carry *% 19;
     Range(0, 17).loop((i) {
-        n = v.read(i) + carry;
+        n = v.read(i) +% carry;
         v.write(i, n % 32768);
         carry = n / 32768;
     });
 }
 add = (out: Ptr<u64>, a: Ptr<u64>, b: Ptr<u64>) {
-    Range(0, 17).loop((i) { out.write(i, a.read(i) + b.read(i)); });
+    Range(0, 17).loop((i) { out.write(i, a.read(i) +% b.read(i)); });
     reduce(out);
 }
 subtract = (out: Ptr<u64>, a: Ptr<u64>, b: Ptr<u64>) {
     Range(0, 17).loop((i) {
         p: u64 = (i == 0).match({true => 32749, false => 32767});
-        out.write(i, a.read(i) + 2 * p - b.read(i));
+        out.write(i, a.read(i) +% 2 * p -% b.read(i));
     });
     reduce(out);
 }
@@ -112,20 +114,20 @@ multiply = (out: Ptr<u64>, a: Ptr<u64>, b: Ptr<u64>, work: Ptr<u64>) {
     Range(0, 33).loop((i) { work.write(i, 0); });
     Range(0, 17).loop((i) {
         Range(0, 17).loop((j) {
-            work.write(i + j, work.read(i + j) + a.read(i) * b.read(j));
+            work.write(i + j, work.read(i + j) +% a.read(i) *% b.read(j));
         });
     });
-    Range(0, 16).loop((i) { work.write(i, work.read(i) + 19 * work.read(i + 17)); });
+    Range(0, 16).loop((i) { work.write(i, work.read(i) +% 19 *% work.read(i + 17)); });
     copy(out, work);
     reduce(out);
 }
 scale = (out: Ptr<u64>, input: Ptr<u64>) {
-    Range(0, 17).loop((i) { out.write(i, input.read(i) * 121665); });
+    Range(0, 17).loop((i) { out.write(i, input.read(i) *% 121665); });
     reduce(out);
 }
 swap = (a: Ptr<u64>, b: Ptr<u64>, bit: u64) {
     Range(0, 17).loop((i) {
-        difference = a.read(i).bit_xor(b.read(i)) * bit;
+        difference = a.read(i).bit_xor(b.read(i)) *% bit;
         a.write(i, a.read(i).bit_xor(difference));
         b.write(i, b.read(i).bit_xor(difference));
     });
@@ -148,8 +150,9 @@ encode = (out: Ptr<u8>, input: Ptr<u64>) {
     Range(0, 32).loop((i) {
         limb = i * 8 / 15;
         n: u64 ::= input.read(limb);
-        (limb < 16).then(() { n = n + input.read(limb + 1) * 32768; });
-        out.write(i, byte(n / power(i * 8 % 15) % 256));
+        (limb < 16).then(() { n = n +% input.read(limb + 1) *% 32768; });
+        // The shift count is public; division here would use a secret numerator.
+        out.write(i, byte(n.shift_right(i * 8 % 15) % 256));
     });
 }
 
@@ -167,7 +170,7 @@ evaluate = (output: Ptr<u8>, private_key: Ptr<u8>, s: Ptr<u64>) bool {
     previous: u64 ::= 0;
     Range(0, 255).loop((step) {
         t      = 254 - step;
-        bit    = scalar.read(t / 8).to_u64() / power(t % 8) % 2;
+        bit    = scalar.read(t / 8).to_u64().shift_right(t % 8) % 2;
         choice = previous.bit_xor(bit);
         swap(x2, x3, choice); swap(z2, z3, choice); previous = bit;
         add(a, x2, z2); multiply(aa, a, a, work);
@@ -193,7 +196,7 @@ evaluate = (output: Ptr<u8>, private_key: Ptr<u8>, s: Ptr<u64>) bool {
     multiply(temp, x2, inverse, work);
     encode(result, temp);
     nonzero: u64 ::= 0;
-    Range(0, 32).loop((i) { nonzero = nonzero + result.read(i).to_u64(); });
+    Range(0, 32).loop((i) { nonzero = nonzero +% result.read(i).to_u64(); });
     (nonzero != 0).match({
         false => false,
         true  => { output.copy_from(result, 32); true },
