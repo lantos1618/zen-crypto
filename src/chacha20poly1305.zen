@@ -115,8 +115,11 @@ byte = (value: u64) u8 {
     (value % 256).to_usize().match({Ok(n) => n.to_u8().match({Ok(b) => b, None => 0}), None => 0})
 }
 load32 = (input: Ptr<u8>, offset: usize) u32 {
-    input.read(offset).to_u32() + input.read(offset + 1).to_u32() * 256
-        + input.read(offset + 2).to_u32() * 65536 + input.read(offset + 3).to_u32() * 16777216
+    // A u32 holds the assembled word. Wrapping spells out that no checked
+    // arithmetic may branch on secret key or plaintext bytes.
+    input.read(offset).to_u32() +% input.read(offset + 1).to_u32() *% 256
+        +% input.read(offset + 2).to_u32() *% 65536
+        +% input.read(offset + 3).to_u32() *% 16777216
 }
 store = (output: Ptr<u8>, value: u64, count: usize) {
     word ::= value;
